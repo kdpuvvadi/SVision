@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SVision</title>
+  <link rel="stylesheet" href="/static/styles.css?v=9" />
+</head>
+<body class="mode-inspect">
+  <header class="topbar">
+    <div class="brand">
+      <span class="mark">SV</span>
+      <div>
+        <strong>SVision</strong>
+        <small id="brandLayout">Inspection</small>
+      </div>
+    </div>
+    <label class="project-pick">
+      Scene
+      <select id="projectSelect"></select>
+    </label>
+    <button id="newProject" class="edit-only" type="button">New</button>
+    <button id="renameProject" class="edit-only" type="button">Rename</button>
+    <button id="deleteProject" class="edit-only danger" type="button">Delete</button>
+    <span class="layout-badge" id="layoutBadge">Layout: <b id="layoutName">Inspection</b></span>
+    <button id="switchLayout" type="button">Switch layout</button>
+    <div class="host" id="hostInfo">Starting…</div>
+  </header>
+
+  <main>
+    <section id="inspect" class="view active">
+      <aside class="flow">
+        <h2>Flow</h2>
+        <p class="layout-now" id="sceneLayout">Layout: Inspection</p>
+        <ol id="flowList"></ol>
+        <div class="scene-edit">
+          <h2>Add tool</h2>
+          <div id="sceneTools"></div>
+          <button id="sceneSave" type="button" class="primary">Save</button>
+        </div>
+        <p class="hint inspect-only">Judgment is OK only if every tool passes.</p>
+      </aside>
+      <section class="stage">
+        <div class="stage-bar">
+          <span id="imageName">No image</span>
+          <span id="imageSize"></span>
+        </div>
+        <div class="canvas-wrap" id="dropZone">
+          <img id="preview" alt="Inspection image" hidden />
+          <div class="empty" id="emptyState">
+            <p id="emptyTitle">Add a Camera tool</p>
+            <p id="emptyDetail">Image input is available only after Camera is in the flow.</p>
+          </div>
+        </div>
+      </section>
+      <aside class="judge">
+        <div id="sceneSettings" class="scene-edit"></div>
+        <div class="inspect-only">
+        <div id="verdict" class="verdict idle">--</div>
+        <div id="elapsed" class="elapsed">-- ms</div>
+        <p id="verdictMsg" class="msg">Upload an image to inspect.</p>
+        <div class="actions">
+          <label class="file-btn">
+            Choose images
+            <input id="inspectFiles" type="file" accept="image/*" multiple hidden />
+          </label>
+          <button id="runInspect" type="button" class="primary">Measure</button>
+        </div>
+        <div id="toolResults" class="tool-results"></div>
+        <div class="batch" id="batchBox" hidden>
+          <div class="batch-head">
+            <span id="batchSummary"></span>
+          </div>
+          <ul id="batchList"></ul>
+        </div>
+        </div>
+      </aside>
+    </section>
+
+    <section id="flow" class="view">
+      <aside class="flow editor-flow">
+        <h2>Flow</h2>
+        <p class="layout-now">Layout: Edit</p>
+        <ol id="editFlowList"></ol>
+        <p class="hint">Click a tool to edit it. Remove takes it out of the flow.</p>
+      </aside>
+      <section class="tool-panel" id="toolPanel">
+        <div class="empty" id="toolEmpty">Select a tool, or add one from the list.</div>
+      </section>
+      <aside class="catalog" id="catalog">
+        <h2>Add tool</h2>
+        <div id="toolButtons"></div>
+      </aside>
+      <div class="flow-bar">
+        <span id="flowSaveState"></span>
+        <button id="saveFlowBtn" type="button" class="primary">Save</button>
+        <button id="exitFlow" type="button">Exit</button>
+      </div>
+    </section>
+  </main>
+  <script src="/static/app.js?v=10"></script>
+</body>
+</html>
