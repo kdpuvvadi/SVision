@@ -10,6 +10,7 @@ const state = {
   settingTab: "name",
   layout: "inspect",
   editorOpen: false,
+  flowOpen: false,
   outputId: null,
   resultIndex: 0,
   zoom: { scale: 1, x: 0, y: 0, drag: null },
@@ -109,10 +110,13 @@ async function openProject(id) {
 
 function renderFlow() {
   const list = tools();
-  const editing = state.layout === "edit";
+  const editing = state.layout === "edit" && state.flowOpen;
+  $("editFlowBtn").hidden = state.layout !== "edit";
+  $("flowEditBox").hidden = !editing;
+  document.body.classList.toggle("flow-open", editing);
   $("flowList").innerHTML = list.length
     ? list.map((tool, i) => `
-        <li class="${tool.id === state.outputId || tool.id === state.selectedId ? "selected" : ""}" data-id="${tool.id}">
+        <li class="${tool.id === state.selectedId || tool.id === state.outputId ? "selected" : ""}" data-id="${tool.id}">
           <div>
             <b>${i + 1}. ${escapeHtml(tool.name)}</b>
             <span>${escapeHtml(specFor(tool.type)?.title || tool.type)}</span>
@@ -124,7 +128,7 @@ function renderFlow() {
           </div>` : ""}
         </li>`).join("")
     : `<li class="off"><b>No tools</b></li>`;
-  if (editing) renderSceneSettings();
+  renderSceneSettings();
 }
 
 function renderEditor() {
@@ -157,7 +161,16 @@ function settingTabs(spec) {
 
 function renderSceneSettings() {
   const panel = $("sceneSettings");
-  if (!panel || state.layout !== "edit") return;
+  if (!panel) return;
+  const tool = state.flowOpen ? selectedTool() : null;
+  if (!tool) {
+    panel.hidden = true;
+    panel.innerHTML = "";
+    document.body.classList.remove("tool-settings");
+    return;
+  }
+  panel.hidden = false;
+  document.body.classList.add("tool-settings");
   renderOptionsInto(panel);
 }
 
@@ -371,6 +384,8 @@ function showEditor() {
 function showLayout(name) {
   state.layout = name === "edit" ? "edit" : "inspect";
   state.editorOpen = false;
+  state.flowOpen = false;
+  state.selectedId = null;
   document.body.classList.toggle("mode-inspect", state.layout === "inspect");
   document.body.classList.toggle("mode-edit", state.layout === "edit");
   const layoutLabel = state.layout === "edit" ? "Edit" : "Inspection";
@@ -384,6 +399,11 @@ function showLayout(name) {
 
 function bind() {
   showLayout("inspect");
+  $("editFlowBtn").addEventListener("click", () => {
+    state.flowOpen = !state.flowOpen;
+    if (!state.flowOpen) state.selectedId = null;
+    renderFlow();
+  });
   $("switchLayout").addEventListener("click", async () => {
     if (state.layout === "edit") {
       try {

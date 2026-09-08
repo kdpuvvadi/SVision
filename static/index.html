@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>SVision</title>
-  <link rel="stylesheet" href="/static/styles.css?v=9" />
+  <link rel="stylesheet" href="/static/styles.css?v=13" />
 </head>
 <body class="mode-inspect">
   <header class="topbar">
@@ -32,12 +32,8 @@
       <aside class="flow">
         <h2>Flow</h2>
         <p class="layout-now" id="sceneLayout">Layout: Inspection</p>
+        <button id="editFlowBtn" class="edit-only" type="button">Edit flow</button>
         <ol id="flowList"></ol>
-        <div class="scene-edit">
-          <h2>Add tool</h2>
-          <div id="sceneTools"></div>
-          <button id="sceneSave" type="button" class="primary">Save</button>
-        </div>
         <p class="hint inspect-only">Judgment is OK only if every tool passes.</p>
       </aside>
       <section class="stage">
@@ -45,6 +41,7 @@
           <span id="imageName">No image</span>
           <span id="imageSize"></span>
         </div>
+        <div id="sceneSettings" class="stage-settings" hidden></div>
         <div class="canvas-wrap" id="dropZone">
           <img id="preview" alt="Inspection image" hidden />
           <div class="empty" id="emptyState">
@@ -54,8 +51,11 @@
         </div>
       </section>
       <aside class="judge">
-        <div id="sceneSettings" class="scene-edit"></div>
-        <div class="inspect-only">
+        <div id="flowEditBox" hidden>
+          <h2>Add tool</h2>
+          <div id="sceneTools"></div>
+          <button id="sceneSave" type="button" class="primary">Save</button>
+        </div>
         <div id="verdict" class="verdict idle">--</div>
         <div id="elapsed" class="elapsed">-- ms</div>
         <p id="verdictMsg" class="msg">Upload an image to inspect.</p>
@@ -72,7 +72,6 @@
             <span id="batchSummary"></span>
           </div>
           <ul id="batchList"></ul>
-        </div>
         </div>
       </aside>
     </section>
@@ -98,6 +97,6 @@
       </div>
     </section>
   </main>
-  <script src="/static/app.js?v=10"></script>
+  <script src="/static/app.js?v=13"></script>
 </body>
 </html>
