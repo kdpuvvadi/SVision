@@ -50,6 +50,38 @@ def _write_json(path: Path, payload: dict) -> None:
     tmp.replace(path)
 
 
+def _settings_path() -> Path:
+    return DATA_DIR / "settings.json"
+
+
+def default_settings() -> dict:
+    return {"layout": "inspect", "flow_open": False}
+
+
+def load_settings() -> dict:
+    path = _settings_path()
+    settings = default_settings()
+    if path.exists():
+        try:
+            raw = _read_json(path)
+        except (OSError, json.JSONDecodeError):
+            raw = {}
+        layout = raw.get("layout")
+        if layout in ("inspect", "edit"):
+            settings["layout"] = layout
+        settings["flow_open"] = bool(raw.get("flow_open")) and settings["layout"] == "edit"
+    return settings
+
+
+def save_settings(layout: str, flow_open: bool = False) -> dict:
+    settings = {
+        "layout": "edit" if layout == "edit" else "inspect",
+        "flow_open": bool(flow_open) and layout == "edit",
+    }
+    _write_json(_settings_path(), settings)
+    return settings
+
+
 def _empty_state() -> dict:
     return {
         "samples": [],

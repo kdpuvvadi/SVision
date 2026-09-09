@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from app.config import DATA_DIR, HOST, PORT, ROOT, THREAD_COUNT, ensure_dirs, lan_addresses
 from app.core.camera import ImageSource
 from app.core.engine import inspect_many
-from app.storage.store import store
+from app.storage.store import load_settings, save_settings, store
 from app.tools.registry import catalog
 
 ensure_dirs()
@@ -42,6 +42,11 @@ class ToolCreate(BaseModel):
     type: str
 
 
+class SettingsUpdate(BaseModel):
+    layout: str = "inspect"
+    flow_open: bool = False
+
+
 def _jpeg_url(raw: bytes) -> str:
     if not raw:
         return ""
@@ -67,6 +72,16 @@ def health() -> dict:
         "data_dir": str(DATA_DIR),
         "camera": ImageSource().status().__dict__,
     }
+
+
+@app.get("/api/settings")
+def get_settings() -> dict:
+    return load_settings()
+
+
+@app.put("/api/settings")
+def put_settings(body: SettingsUpdate) -> dict:
+    return save_settings(body.layout, body.flow_open)
 
 
 @app.get("/api/tools")

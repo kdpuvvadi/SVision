@@ -78,6 +78,11 @@ async function boot() {
     ? `Configure from another PC: ${urls[0]}`
     : `Local: ${state.health.urls[0]}`;
   renderCatalog();
+  try {
+    state.settings = await api("/api/settings");
+  } catch {
+    state.settings = { layout: "inspect", flow_open: false };
+  }
   await loadProjects();
   bind();
 }
@@ -397,10 +402,11 @@ function showEditor() {
   $("flow").classList.add("active");
 }
 
-function showLayout(name) {
+function showLayout(name, options = {}) {
   state.layout = name === "edit" ? "edit" : "inspect";
   state.editorOpen = false;
-  state.flowOpen = false;
+  if (!options.keepFlow) state.flowOpen = false;
+  if (state.layout !== "edit") state.flowOpen = false;
   state.selectedId = null;
   document.body.classList.toggle("mode-inspect", state.layout === "inspect");
   document.body.classList.toggle("mode-edit", state.layout === "edit");
@@ -413,12 +419,30 @@ function showLayout(name) {
   renderCatalog();
 }
 
+async function persistLayout() {
+  try {
+    state.settings = await api("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        layout: state.layout,
+        flow_open: state.layout === "edit" && state.flowOpen,
+      }),
+    });
+  } catch {
+    // Layout still applies in this session if settings cannot be written.
+  }
+}
+
 function bind() {
-  showLayout("inspect");
+  const saved = state.settings?.layout === "edit" ? "edit" : "inspect";
+  state.flowOpen = saved === "edit" && !!state.settings?.flow_open;
+  showLayout(saved, { keepFlow: state.flowOpen });
   $("editFlowBtn").addEventListener("click", () => {
     state.flowOpen = !state.flowOpen;
     if (!state.flowOpen) state.selectedId = null;
     renderFlow();
+    persistLayout();
   });
   $("switchLayout").addEventListener("click", async () => {
     if (state.layout === "edit") {
@@ -429,9 +453,11 @@ function bind() {
         return;
       }
       showLayout("inspect");
+      persistLayout();
       return;
     }
     showLayout("edit");
+    persistLayout();
   });
   $("saveFlowBtn").addEventListener("click", async () => {
     try {
