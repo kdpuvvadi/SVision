@@ -2,9 +2,17 @@ from __future__ import annotations
 
 import os
 import socket
+import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+
+def _app_root() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
+    return Path(__file__).resolve().parent.parent
+
+
+ROOT = _app_root()
 _DEFAULT_DATA = Path.home() / ".config" / "svision" / "data"
 DATA_DIR = Path(os.environ.get("SVISION_DATA") or _DEFAULT_DATA).expanduser()
 HOST = os.environ.get("SVISION_HOST", "0.0.0.0")

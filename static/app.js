@@ -122,6 +122,7 @@ async function openProject(id) {
   renderCatalog();
   renderEditor();
   updateImageInput();
+  await restoreCurrentImage();
 }
 
 function renderFlow() {
@@ -756,8 +757,9 @@ function bind() {
 
   $("inspectFiles").addEventListener("change", (e) => {
     if (!imageInputReady()) return;
-    state.pendingFiles = [...e.target.files];
-    if (state.pendingFiles.length) previewLocal(state.pendingFiles[0]);
+    const files = [...e.target.files];
+    e.target.value = "";
+    if (files.length) selectImages(files);
   });
   $("runInspect").addEventListener("click", runInspect);
 
@@ -774,9 +776,7 @@ function bind() {
     if (!imageInputReady()) return;
     const files = [...e.dataTransfer.files].filter((f) => f.type.startsWith("image/"));
     if (!files.length) return;
-    state.pendingFiles = files;
-    previewLocal(files[0]);
-    runInspect();
+    selectImages(files, { measure: true });
   });
 
   $("batchList").addEventListener("click", (e) => {
@@ -829,6 +829,63 @@ function previewLocal(file) {
   $("preview").src = state.sourceUrl;
   resetZoom();
   renderFlow();
+}
+
+function showStoredImage(item) {
+  if (!item?.url) return;
+  state.outputId = null;
+  state.sourceUrl = "";
+  $("imageName").textContent = item.filename || "Selected image";
+  $("emptyState").hidden = true;
+  $("preview").hidden = false;
+  $("preview").src = `${item.url}?t=${Date.now()}`;
+  resetZoom();
+}
+
+async function selectImages(files, options = {}) {
+  state.pendingFiles = files;
+  state.lastResults = [];
+  $("toolResults").innerHTML = "";
+  $("batchBox").hidden = true;
+  previewLocal(files[0]);
+  const body = new FormData();
+  files.forEach((file) => body.append("files", file));
+  try {
+    const saved = await api(`/api/projects/${state.project.id}/current-image`, { method: "POST", body });
+    state.pendingFiles = [];
+    state.storedImage = true;
+    if (!options.measure && saved.files?.[0]) showStoredImage(saved.files[0]);
+  } catch (err) {
+    $("verdictMsg").textContent = err.message;
+  }
+  if (options.measure) await runInspect();
+}
+
+async function restoreCurrentImage() {
+  if (!state.project) return;
+  try {
+    const saved = await api(`/api/projects/${state.project.id}/current-image`);
+    state.storedImage = !!saved.files?.length;
+    if (saved.result?.results?.length) {
+      state.lastResults = saved.result.results;
+      showResult(0);
+      renderBatch(saved.result);
+      return;
+    }
+    state.lastResults = [];
+    $("toolResults").innerHTML = "";
+    $("batchBox").hidden = true;
+    if (saved.files?.[0]) {
+      showStoredImage(saved.files[0]);
+      return;
+    }
+    $("preview").hidden = true;
+    $("preview").removeAttribute("src");
+    $("imageName").textContent = "No image";
+    $("emptyState").hidden = false;
+  } catch {
+    state.storedImage = false;
+  }
 }
 
 function toolImage(result) {
@@ -988,7 +1045,7 @@ async function runInspect() {
     $("verdictMsg").textContent = "Add a Camera tool set to Upload image.";
     return;
   }
-  if (!state.pendingFiles.length) {
+  if (!state.pendingFiles.length && !state.storedImage) {
     $("verdictMsg").textContent = "Choose or drop images first.";
     return;
   }
@@ -999,6 +1056,8 @@ async function runInspect() {
     const body = new FormData();
     state.pendingFiles.forEach((f) => body.append("files", f));
     const data = await api(`/api/projects/${state.project.id}/inspect`, { method: "POST", body });
+    state.pendingFiles = [];
+    state.storedImage = true;
     state.lastResults = data.results;
     showResult(0);
     renderBatch(data);

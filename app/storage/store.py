@@ -463,4 +463,86 @@ class ProjectStore:
         return cv2.resize(image, (nw, nh), interpolation=cv2.INTER_AREA)
 
 
+def _safe_name(name: str, index: int) -> str:
+    stem = Path(name or "image").name
+    stem = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in stem).strip("._")
+    if not stem:
+        stem = "image"
+    return f"{index:02d}_{stem}"[:120]
+
+
+class CurrentImageStore:
+    def dir(self, project_id: str) -> Path:
+        return _project_dir(project_id) / "current"
+
+    def clear(self, project_id: str) -> None:
+        path = self.dir(project_id)
+        if path.exists():
+            shutil.rmtree(path, ignore_errors=True)
+
+    def save(self, project_id: str, files: list[tuple[str, bytes]]) -> list[dict]:
+        if not files:
+            raise ValueError("No image selected.")
+        self.clear(project_id)
+        dest = self.dir(project_id)
+        dest.mkdir(parents=True, exist_ok=True)
+        saved = []
+        for index, (name, raw) in enumerate(files):
+            if not raw:
+                continue
+            stored = _safe_name(name, index)
+            (dest / stored).write_bytes(raw)
+            saved.append({"name": stored, "filename": name or stored, "index": index})
+        if not saved:
+            raise ValueError("No image selected.")
+        _write_json(dest / "manifest.json", {"files": saved})
+        return saved
+
+    def files(self, project_id: str) -> list[dict]:
+        path = self.dir(project_id) / "manifest.json"
+        if not path.exists():
+            return []
+        try:
+            raw = _read_json(path).get("files") or []
+        except (OSError, json.JSONDecodeError):
+            return []
+        found = []
+        for item in raw:
+            stored = Path(str(item.get("name") or "")).name
+            if not stored or stored in {"manifest.json", "result.json"}:
+                continue
+            if (self.dir(project_id) / stored).is_file():
+                found.append({"name": stored, "filename": item.get("filename") or stored, "index": item.get("index", len(found))})
+        return found
+
+    def read(self, project_id: str) -> list[tuple[str, bytes]]:
+        items = []
+        for item in self.files(project_id):
+            raw = (self.dir(project_id) / item["name"]).read_bytes()
+            items.append((item["filename"], raw))
+        return items
+
+    def path(self, project_id: str, index: int) -> Path:
+        files = self.files(project_id)
+        if index < 0 or index >= len(files):
+            raise FileNotFoundError("Selected image is not saved.")
+        return self.dir(project_id) / files[index]["name"]
+
+    def save_result(self, project_id: str, result: dict) -> None:
+        dest = self.dir(project_id)
+        dest.mkdir(parents=True, exist_ok=True)
+        _write_json(dest / "result.json", result)
+
+    def result(self, project_id: str) -> dict | None:
+        path = self.dir(project_id) / "result.json"
+        if not path.exists():
+            return None
+        try:
+            raw = _read_json(path)
+        except (OSError, json.JSONDecodeError):
+            return None
+        return raw if isinstance(raw, dict) else None
+
+
+current_images = CurrentImageStore()
 store = ProjectStore()

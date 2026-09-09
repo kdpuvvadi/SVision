@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from app.config import DATA_DIR, HOST, PORT, ROOT, THREAD_COUNT, ensure_dirs, lan_addresses
 from app.core.camera import ImageSource
 from app.core.engine import inspect_many
-from app.storage.store import load_settings, save_settings, store
+from app.storage.store import current_images, load_settings, save_settings, store
 from app.tools.registry import catalog
 
 ensure_dirs()
@@ -234,14 +234,82 @@ def train_project(project_id: str, tool_id: str) -> dict:
         raise HTTPException(400, str(exc)) from exc
 
 
-@app.post("/api/projects/{project_id}/inspect")
-async def inspect(project_id: str, files: list[UploadFile] = File(...)) -> dict:
+@app.get("/api/projects/{project_id}/current-image")
+def get_current_image(project_id: str) -> dict:
+    try:
+        store.get_project(project_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    files = current_images.files(project_id)
+    return {
+        "files": [
+            {
+                "filename": item["filename"],
+                "url": f"/api/projects/{project_id}/current-image/{item['index']}",
+            }
+            for item in files
+        ],
+        "result": current_images.result(project_id),
+    }
+
+
+@app.get("/api/projects/{project_id}/current-image/{index}")
+def get_current_image_file(project_id: str, index: int) -> FileResponse:
+    try:
+        path = current_images.path(project_id, index)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return FileResponse(path)
+
+
+@app.post("/api/projects/{project_id}/current-image")
+async def put_current_image(project_id: str, files: list[UploadFile] = File(...)) -> dict:
+    try:
+        store.get_project(project_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
     payload: list[tuple[str, bytes]] = []
     for item in files:
         raw = await item.read()
         if raw:
             payload.append((item.filename or "image.png", raw))
+    if not payload:
+        raise HTTPException(400, "No image selected.")
     try:
+        current_images.save(project_id, payload)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return await _current_payload(project_id)
+
+
+async def _current_payload(project_id: str) -> dict:
+    files = current_images.files(project_id)
+    return {
+        "files": [
+            {
+                "filename": item["filename"],
+                "url": f"/api/projects/{project_id}/current-image/{item['index']}",
+            }
+            for item in files
+        ],
+        "result": None,
+    }
+
+
+@app.post("/api/projects/{project_id}/inspect")
+async def inspect(project_id: str, files: list[UploadFile] | None = File(default=None)) -> dict:
+    payload: list[tuple[str, bytes]] = []
+    for item in files or []:
+        raw = await item.read()
+        if raw:
+            payload.append((item.filename or "image.png", raw))
+    try:
+        if payload:
+            current_images.save(project_id, payload)
+        else:
+            payload = current_images.read(project_id)
+        if not payload:
+            raise ValueError("Choose or drop images first.")
         result = inspect_many(project_id, payload)
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
@@ -250,6 +318,7 @@ async def inspect(project_id: str, files: list[UploadFile] = File(...)) -> dict:
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     result["results"] = [_public_result(item) for item in result["results"]]
+    current_images.save_result(project_id, result)
     return result
 
 
@@ -262,6 +331,10 @@ def index() -> FileResponse:
 
 
 def main() -> None:
+    import sys
+    import threading
+    import webbrowser
+
     import uvicorn
 
     ips = lan_addresses()
@@ -270,6 +343,12 @@ def main() -> None:
     for ip in ips:
         print(f"  Network: http://{ip}:{PORT}   (open this on another PC)")
     print(f"  Threads: {THREAD_COUNT}")
+    print(f"  Data:    {DATA_DIR}")
+    print("Close this window to stop SVision.")
+    if getattr(sys, "frozen", False):
+        threading.Timer(1.2, lambda: webbrowser.open(f"http://127.0.0.1:{PORT}")).start()
+        uvicorn.run(app, host=HOST, port=PORT, reload=False, workers=1)
+        return
     uvicorn.run("app.main:app", host=HOST, port=PORT, reload=False)
 
 
