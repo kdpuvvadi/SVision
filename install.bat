@@ -11,7 +11,6 @@ if not exist ".venv\Scripts\python.exe" (
 call ".venv\Scripts\activate.bat"
 python -m pip install --upgrade pip
 pip install -r requirements.txt
-.venv\Scripts\pip install "rapidocr-onnxruntime>=1.2.3,<1.3"
 echo.
 echo Installed. Start the server with run.bat
 pause
