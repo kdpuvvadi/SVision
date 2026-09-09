@@ -3,7 +3,7 @@
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
-datas = [("static", "static")]
+datas = [("static", "static"), (".version", ".")]
 binaries = []
 hiddenimports = [
     "app",

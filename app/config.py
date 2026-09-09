@@ -24,6 +24,15 @@ FEATURE_VERSION = 2
 FEATURE_SIZE = 64
 
 
+def app_version() -> str:
+    path = ROOT / ".version"
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    return text.splitlines()[0].strip() if text else ""
+
+
 def ensure_dirs() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     (DATA_DIR / "projects").mkdir(parents=True, exist_ok=True)

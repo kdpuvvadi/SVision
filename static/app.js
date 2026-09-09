@@ -74,9 +74,9 @@ async function boot() {
   state.health = await api("/api/health");
   state.catalog = await api("/api/tools");
   const urls = state.health.urls.filter((u) => !u.includes("127.0.0.1"));
-  $("hostInfo").textContent = urls.length
-    ? `Configure from another PC: ${urls[0]}`
-    : `Local: ${state.health.urls[0]}`;
+  const where = urls.length ? urls[0] : state.health.urls[0];
+  const version = (state.health.version || "").trim();
+  $("hostInfo").textContent = version ? `${where}  ·  v${version}` : where;
   renderCatalog();
   try {
     state.settings = await api("/api/settings");

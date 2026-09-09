@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from app.config import DATA_DIR, HOST, PORT, ROOT, THREAD_COUNT, ensure_dirs, lan_addresses
+from app.config import DATA_DIR, HOST, PORT, ROOT, THREAD_COUNT, app_version, ensure_dirs, lan_addresses
 from app.core.camera import ImageSource
 from app.core.engine import inspect_many
 from app.storage.store import current_images, load_settings, save_settings, store
@@ -65,6 +65,7 @@ def health() -> dict:
     ips = lan_addresses()
     return {
         "status": "ok",
+        "version": app_version(),
         "host": HOST,
         "port": PORT,
         "urls": [f"http://127.0.0.1:{PORT}"] + [f"http://{ip}:{PORT}" for ip in ips],
@@ -338,7 +339,7 @@ def main() -> None:
     import uvicorn
 
     ips = lan_addresses()
-    print("SVision inspection server")
+    print(f"SVision {app_version() or ''}".rstrip())
     print(f"  Local:   http://127.0.0.1:{PORT}")
     for ip in ips:
         print(f"  Network: http://{ip}:{PORT}   (open this on another PC)")
