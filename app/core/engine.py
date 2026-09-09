@@ -47,13 +47,51 @@ def _mark_pose(view: np.ndarray, result: dict, src_w: int, src_h: int) -> np.nda
     return marked
 
 
-def _tool_preview(image: np.ndarray | None, result: dict, mark: bool) -> bytes:
+def _tool_roi(spec: dict) -> dict | None:
+    cfg = spec.get("config") or {}
+    roi = cfg.get("roi") or cfg.get("search_roi")
+    if not isinstance(roi, dict):
+        return None
+    try:
+        width = float(roi.get("w", 0))
+        height = float(roi.get("h", 0))
+    except (TypeError, ValueError):
+        return None
+    if width <= 0.01 or height <= 0.01:
+        return None
+    return roi
+
+
+def _draw_region(view: np.ndarray, roi: dict | None, src_w: int, src_h: int) -> np.ndarray:
+    if not roi or src_w <= 0 or src_h <= 0:
+        return view
+    marked = view.copy()
+    sx = marked.shape[1] / src_w
+    sy = marked.shape[0] / src_h
+    x = float(roi.get("x", 0))
+    y = float(roi.get("y", 0))
+    rw = float(roi.get("w", 1))
+    rh = float(roi.get("h", 1))
+    if max(x, y, rw, rh) <= 1.5:
+        x0, y0 = int(x * src_w * sx), int(y * src_h * sy)
+        x1, y1 = int((x + rw) * src_w * sx), int((y + rh) * src_h * sy)
+    else:
+        x0, y0 = int(x * sx), int(y * sy)
+        x1, y1 = int((x + rw) * sx), int((y + rh) * sy)
+    color = (40, 220, 220)
+    thick = max(2, int(round(min(marked.shape[:2]) / 280)))
+    cv2.rectangle(marked, (x0, y0), (x1, y1), color, thick)
+    return marked
+
+
+def _tool_preview(image: np.ndarray | None, result: dict, mark: bool, roi: dict | None = None) -> bytes:
     if image is None or image.size == 0:
         return b""
     src_h, src_w = image.shape[:2]
     view = _fit_preview(image)
     if mark:
         view = _mark_pose(view, result, src_w, src_h)
+    view = _draw_region(view, roi, src_w, src_h)
     return encode_jpeg(view, 70)
 
 
@@ -65,9 +103,9 @@ def _step_image(spec: dict, source: np.ndarray, seen: np.ndarray, heat: np.ndarr
     return seen
 
 
-def _attach_preview(result: dict, image: np.ndarray | None, mark: bool) -> None:
+def _attach_preview(result: dict, image: np.ndarray | None, mark: bool, spec: dict | None = None) -> None:
     try:
-        result["preview_jpeg"] = _tool_preview(image, result, mark)
+        result["preview_jpeg"] = _tool_preview(image, result, mark, _tool_roi(spec or {}))
     except Exception:
         result["preview_jpeg"] = b""
 
@@ -140,7 +178,7 @@ def inspect_array(project_id: str, image: np.ndarray, filename: str = "image") -
                 result, heat = future.result()
                 if result.get("pose"):
                     ctx["pose"] = result["pose"]
-                _attach_preview(result, _step_image(spec, image, seen, heat), heat is None and spec.get("type") != "camera")
+                _attach_preview(result, _step_image(spec, image, seen, heat), heat is None and spec.get("type") != "camera", spec)
                 tools.append(result)
                 if heat is not None:
                     overlay = heat
@@ -148,7 +186,7 @@ def inspect_array(project_id: str, image: np.ndarray, filename: str = "image") -
             spec = active[index]
             index += 1
             result, heat = _run_one(project_id, seen, spec, ctx)
-            _attach_preview(result, _step_image(spec, image, seen, heat), heat is None and spec.get("type") != "camera")
+            _attach_preview(result, _step_image(spec, image, seen, heat), heat is None and spec.get("type") != "camera", spec)
             tools.append(result)
             if ctx.get("image") is not None:
                 working = ctx["image"]

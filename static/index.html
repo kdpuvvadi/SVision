@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>SVision</title>
-  <link rel="stylesheet" href="/static/styles.css?v=18" />
+  <link rel="stylesheet" href="/static/styles.css?v=19" />
 </head>
 <body class="mode-inspect">
   <header class="topbar">
@@ -51,6 +51,7 @@
         <div id="sceneSettings" class="stage-settings" hidden></div>
         <div class="canvas-wrap" id="dropZone">
           <img id="preview" alt="Inspection image" hidden />
+          <canvas id="regionOverlay" hidden></canvas>
           <div class="empty" id="emptyState">
             <p id="emptyTitle">Add a Camera tool</p>
             <p id="emptyDetail">Image input is available only after Camera is in the flow.</p>
@@ -103,6 +104,6 @@
       </div>
     </section>
   </main>
-  <script src="/static/app.js?v=19"></script>
+  <script src="/static/app.js?v=20"></script>
 </body>
 </html>

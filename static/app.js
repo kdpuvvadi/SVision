@@ -233,6 +233,14 @@ function renderOptionsInto(panel) {
     </div>`;
   if (active.field?.kind === "roi") drawRoiCanvas();
   if (active.panel === "shape_model") drawModelCanvas();
+  drawToolOutputRegion(tool);
+}
+
+function toolRegion(tool) {
+  const cfg = tool?.config || {};
+  const roi = cfg.roi || cfg.search_roi;
+  if (!roi || Number(roi.w) <= 0.01 || Number(roi.h) <= 0.01) return null;
+  return roi;
 }
 
 function toolOutputHtml(tool) {
@@ -240,7 +248,7 @@ function toolOutputHtml(tool) {
   if (!result) return `<p class="hint">Measure to see this tool's output.</p>`;
   const image = toolImage(result);
   const img = image
-    ? `<img class="tool-output-img" src="${image}" alt="Output of ${escapeHtml(toolDisplayName(tool))}" />`
+    ? `<div class="tool-output-frame"><img class="tool-output-img" src="${image}" alt="Output of ${escapeHtml(toolDisplayName(tool))}" /><canvas class="region-overlay"></canvas></div>`
     : "";
   return `<div class="tool-output">${img}<p>${escapeHtml(toolDetail(result))}</p></div>`;
 }
@@ -827,10 +835,66 @@ function toolImage(result) {
   return result?.preview || "";
 }
 
+function contentFit(boxW, boxH, imgW, imgH) {
+  if (!boxW || !boxH || !imgW || !imgH) return null;
+  const scale = Math.min(boxW / imgW, boxH / imgH);
+  const w = imgW * scale;
+  const h = imgH * scale;
+  return { x: (boxW - w) / 2, y: (boxH - h) / 2, w, h };
+}
+
+function strokeRegion(canvas, img, roi) {
+  if (!canvas) return;
+  const box = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.max(1, Math.round(box.width * dpr));
+  canvas.height = Math.max(1, Math.round(box.height * dpr));
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (!roi || !img) return;
+  const fit = contentFit(canvas.width, canvas.height, img.naturalWidth || img.width, img.naturalHeight || img.height);
+  if (!fit) return;
+  ctx.strokeStyle = "#1ad4c0";
+  ctx.lineWidth = Math.max(2, 2 * dpr);
+  ctx.strokeRect(fit.x + Number(roi.x) * fit.w, fit.y + Number(roi.y) * fit.h, Number(roi.w) * fit.w, Number(roi.h) * fit.h);
+}
+
+function whenImageReady(img, fn) {
+  if (!img) return;
+  if (img.complete && img.naturalWidth) fn();
+  else img.addEventListener("load", fn, { once: true });
+}
+
+function drawPreviewRegion(tool) {
+  const canvas = $("regionOverlay");
+  const img = $("preview");
+  if (!canvas || !img) return;
+  const roi = toolRegion(tool);
+  if (!roi || img.hidden) {
+    canvas.hidden = true;
+    return;
+  }
+  canvas.hidden = false;
+  whenImageReady(img, () => strokeRegion(canvas, img, roi));
+}
+
+function drawToolOutputRegion(tool) {
+  const frame = document.querySelector("#sceneSettings .tool-output-frame");
+  if (!frame) return;
+  const img = frame.querySelector("img");
+  const canvas = frame.querySelector("canvas");
+  const roi = toolRegion(tool);
+  if (!roi) return;
+  whenImageReady(img, () => strokeRegion(canvas, img, roi));
+}
+
 function applyZoom() {
   const img = $("preview");
+  const overlay = $("regionOverlay");
   const { scale, x, y } = state.zoom;
-  img.style.transform = `translate(${x}px, ${y}px) scale(${scale})`;
+  const transform = `translate(${x}px, ${y}px) scale(${scale})`;
+  img.style.transform = transform;
+  if (overlay) overlay.style.transform = transform;
   $("dropZone").classList.toggle("zoomed", scale > 1);
 }
 
@@ -878,6 +942,11 @@ function bindZoom(zone) {
     state.zoom.drag = null;
   });
   zone.addEventListener("dblclick", () => resetZoom());
+  window.addEventListener("resize", () => {
+    const tool = tools().find((item) => item.id === (state.outputId || state.selectedId));
+    drawPreviewRegion(tool);
+    drawToolOutputRegion(tool);
+  });
 }
 
 function showToolOutput(id, options = {}) {
@@ -894,6 +963,7 @@ function showToolOutput(id, options = {}) {
       $("preview").hidden = false;
       $("preview").src = image;
       resetZoom();
+      $("preview").onload = () => drawPreviewRegion(flowTool);
     }
     if (result) {
       const cls = (result.judgment || "idle").toLowerCase();
@@ -906,6 +976,7 @@ function showToolOutput(id, options = {}) {
       $("imageName").textContent = flowTool.name;
       $("verdictMsg").textContent = "Measure to see this tool's output.";
     }
+    drawPreviewRegion(flowTool);
   }
   document.querySelectorAll("#toolResults .card").forEach((card) => {
     card.classList.toggle("selected", card.dataset.tool === id);
@@ -961,6 +1032,8 @@ function showResult(index) {
   if (measured?.id) state.outputId = measured.id;
   $("imageName").textContent = measured?.preview ? `${measured.name} output` : item.filename;
   resetZoom();
+  const shown = tools().find((tool) => tool.id === measured?.id) || measured;
+  drawPreviewRegion(shown);
   $("toolResults").innerHTML = item.tools.map(toolCard).join("");
   renderFlow();
 }

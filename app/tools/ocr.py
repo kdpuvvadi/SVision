@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import numpy as np
 
-from app.core.ocr_tool import read_text, tesseract_available
+from app.core.ocr_tool import ocr_available, read_text
 from app.tools.base import Tool
 
 
 class OcrTool(Tool):
     type = "ocr"
     title = "OCR"
-    summary = "Read text in this tool's own region."
+    summary = "Read text only inside the drawn region."
 
     def fields(self) -> list[dict]:
         return [
@@ -31,9 +31,9 @@ class OcrTool(Tool):
         return {"expected": "", "match_mode": "contains", "roi": None}
 
     def status(self) -> str:
-        if tesseract_available():
-            return "Tesseract is available."
-        return "OCR needs Tesseract on this IPC."
+        if ocr_available():
+            return "Draw a region. Only that area is read."
+        return "OCR library is missing. Run: pip install rapidocr-onnxruntime"
 
     def run(self, image: np.ndarray, tool: dict, project_id: str, ctx: dict | None = None) -> tuple[dict, np.ndarray | None]:
         cfg = tool.get("config") or {}

@@ -146,12 +146,25 @@ main { height: calc(100% - 54px); }
   flex-direction: column;
   gap: 6px;
 }
+.tool-output-frame {
+  position: relative;
+  background: #0a0c0e;
+  border: 1px solid var(--line);
+  min-height: 120px;
+}
 .tool-output-img {
-  max-width: 100%;
+  display: block;
+  width: 100%;
   max-height: 240px;
   object-fit: contain;
   background: #0a0c0e;
-  border: 1px solid var(--line);
+}
+.region-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
 }
 .card.selected { outline: 1px solid var(--ok); }
 .flow li.off { opacity: 0.45; }
@@ -185,6 +198,13 @@ main { height: calc(100% - 54px); }
   height: calc(100% - 16px);
   object-fit: contain;
   transform-origin: center center;
+}
+#regionOverlay {
+  position: absolute;
+  inset: 8px;
+  width: calc(100% - 16px);
+  height: calc(100% - 16px);
+  pointer-events: none;
 }
 .canvas-wrap.zoomed { cursor: grab; }
 .canvas-wrap.zoomed:active { cursor: grabbing; }
