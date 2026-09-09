@@ -590,7 +590,14 @@ function bind() {
       if ($("sceneSaveState")) $("sceneSaveState").textContent = err.message;
     }
   });
-  $("sceneSettings").addEventListener("click", (e) => {
+  $("sceneSettings").addEventListener("click", async (e) => {
+    if (e.target.id === "clearRoi") {
+      const tool = selectedTool();
+      const key = e.target.dataset.roiKey || "roi";
+      if (tool) tool.config[key] = null;
+      await saveFlow();
+      return;
+    }
     const tab = e.target.dataset.stab;
     if (!tab) return;
     readOptionsIntoTool();
@@ -682,7 +689,7 @@ function bind() {
     }
   });
 
-  $("toolPanel").addEventListener("mousedown", (e) => {
+  document.addEventListener("mousedown", (e) => {
     if (e.target.id === "modelCanvas") {
       const p = canvasPoint(e, "modelCanvas");
       state.modelDrawing = { x: p.x, y: p.y, x2: p.x, y2: p.y };
@@ -692,15 +699,15 @@ function bind() {
     const p = canvasPoint(e);
     state.drawing = { x: p.x, y: p.y, x2: p.x, y2: p.y };
   });
-  $("toolPanel").addEventListener("mousemove", (e) => {
-    if (state.modelDrawing && e.target.id === "modelCanvas") {
+  document.addEventListener("mousemove", (e) => {
+    if (state.modelDrawing && $("modelCanvas")) {
       const p = canvasPoint(e, "modelCanvas");
       state.modelDrawing.x2 = p.x;
       state.modelDrawing.y2 = p.y;
       drawModelCanvas();
       return;
     }
-    if (!state.drawing || e.target.id !== "roiCanvas") return;
+    if (!state.drawing || !$("roiCanvas")) return;
     const p = canvasPoint(e);
     state.drawing.x2 = p.x;
     state.drawing.y2 = p.y;
