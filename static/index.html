@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>SVision</title>
-  <link rel="stylesheet" href="/static/styles.css?v=13" />
+  <link rel="stylesheet" href="/static/styles.css?v=18" />
 </head>
 <body class="mode-inspect">
   <header class="topbar">
@@ -32,7 +32,14 @@
       <aside class="flow">
         <h2>Flow</h2>
         <p class="layout-now" id="sceneLayout">Layout: Inspection</p>
-        <button id="editFlowBtn" class="edit-only" type="button">Edit flow</button>
+        <div class="flow-bar-slot">
+          <button id="editFlowBtn" class="edit-only" type="button">Edit flow</button>
+          <div id="flowActions" class="flow-save-row" hidden>
+            <button id="sceneSave" type="button" class="primary">Save</button>
+            <button id="exitFlowBtn" type="button">Exit</button>
+          </div>
+          <span id="sceneSaveState"></span>
+        </div>
         <ol id="flowList"></ol>
         <p class="hint inspect-only">Judgment is OK only if every tool passes.</p>
       </aside>
@@ -54,7 +61,6 @@
         <div id="flowEditBox" hidden>
           <h2>Add tool</h2>
           <div id="sceneTools"></div>
-          <button id="sceneSave" type="button" class="primary">Save</button>
         </div>
         <div id="verdict" class="verdict idle">--</div>
         <div id="elapsed" class="elapsed">-- ms</div>
@@ -97,6 +103,6 @@
       </div>
     </section>
   </main>
-  <script src="/static/app.js?v=15"></script>
+  <script src="/static/app.js?v=18"></script>
 </body>
 </html>

@@ -88,7 +88,13 @@ body.mode-edit #inspect.active { grid-template-columns: 300px 1fr 320px; }
 .scene-edit { margin-top: 12px; }
 #sceneTools { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
 #sceneTools button { text-align: left; width: 100%; }
-#editFlowBtn { width: 100%; margin: 8px 0; }
+.flow-bar-slot { margin: 8px 0; }
+#editFlowBtn, .flow-save-row button { width: 100%; }
+.flow-save-row { display: flex; gap: 6px; }
+.flow-save-row button { flex: 1; }
+#editFlowBtn[hidden],
+#flowActions[hidden],
+#flowEditBox[hidden] { display: none; }
 #sceneSettings.stage-settings {
   flex: 1;
   min-height: 0;
@@ -99,7 +105,7 @@ body.mode-edit #inspect.active { grid-template-columns: 300px 1fr 320px; }
 body.flow-open.tool-settings .canvas-wrap,
 body.flow-open.tool-settings .stage-bar { display: none; }
 #flowEditBox { margin-bottom: 12px; }
-#sceneSave { width: 100%; }
+#sceneSaveState { display: block; margin-top: 6px; color: var(--ok); font-size: 12px; }
 #flowList li { cursor: pointer; }
 .host { margin-left: auto; color: #d7ebff; font-size: 12px; text-align: right; }
 

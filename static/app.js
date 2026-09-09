@@ -127,7 +127,8 @@ async function openProject(id) {
 function renderFlow() {
   const list = tools();
   const editing = state.layout === "edit" && state.flowOpen;
-  $("editFlowBtn").hidden = state.layout !== "edit";
+  $("editFlowBtn").hidden = state.layout !== "edit" || editing;
+  $("flowActions").hidden = !editing;
   $("flowEditBox").hidden = !editing;
   document.body.classList.toggle("flow-open", editing);
   $("flowList").innerHTML = list.length
@@ -407,7 +408,7 @@ function showLayout(name, options = {}) {
   state.editorOpen = false;
   if (!options.keepFlow) state.flowOpen = false;
   if (state.layout !== "edit") state.flowOpen = false;
-  state.selectedId = null;
+  if (!options.keepSelection) state.selectedId = null;
   document.body.classList.toggle("mode-inspect", state.layout === "inspect");
   document.body.classList.toggle("mode-edit", state.layout === "edit");
   const layoutLabel = state.layout === "edit" ? "Edit" : "Inspection";
@@ -439,8 +440,14 @@ function bind() {
   state.flowOpen = saved === "edit" && !!state.settings?.flow_open;
   showLayout(saved, { keepFlow: state.flowOpen });
   $("editFlowBtn").addEventListener("click", () => {
-    state.flowOpen = !state.flowOpen;
-    if (!state.flowOpen) state.selectedId = null;
+    state.flowOpen = true;
+    renderFlow();
+    persistLayout();
+  });
+  $("exitFlowBtn").addEventListener("click", () => {
+    state.flowOpen = false;
+    state.selectedId = null;
+    if ($("sceneSaveState")) $("sceneSaveState").textContent = "";
     renderFlow();
     persistLayout();
   });
@@ -567,8 +574,9 @@ function bind() {
       });
       state.selectedId = created.id;
       state.settingTab = "name";
+      state.flowOpen = true;
       await openProject(state.project.id);
-      showLayout("edit");
+      showLayout("edit", { keepFlow: true, keepSelection: true });
     } catch (err) {
       alert(err.message);
     }
@@ -576,8 +584,10 @@ function bind() {
   $("sceneSave").addEventListener("click", async () => {
     try {
       await saveFlow();
+      if ($("sceneSaveState")) $("sceneSaveState").textContent = "Saved";
+      persistLayout();
     } catch (err) {
-      alert(err.message);
+      if ($("sceneSaveState")) $("sceneSaveState").textContent = err.message;
     }
   });
   $("sceneSettings").addEventListener("click", (e) => {
