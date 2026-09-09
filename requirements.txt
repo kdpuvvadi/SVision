@@ -3,3 +3,4 @@ uvicorn>=0.27
 python-multipart>=0.0.9
 numpy>=1.24
 opencv-python-headless>=4.8,<5
+rapidocr-onnxruntime>=1.2.3,<1.3
