@@ -5,7 +5,8 @@ import socket
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = Path(os.environ.get("SVISION_DATA", ROOT / "data"))
+_DEFAULT_DATA = Path.home() / ".config" / "svision" / "data"
+DATA_DIR = Path(os.environ.get("SVISION_DATA") or _DEFAULT_DATA).expanduser()
 HOST = os.environ.get("SVISION_HOST", "0.0.0.0")
 PORT = int(os.environ.get("SVISION_PORT", "8080"))
 MAX_UPLOAD_MB = int(os.environ.get("SVISION_MAX_UPLOAD_MB", "40"))
