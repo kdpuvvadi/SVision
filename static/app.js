@@ -38,6 +38,17 @@ function specFor(type) {
   return state.catalog.find((item) => item.type === type);
 }
 
+function toolTypeName(tool) {
+  return specFor(tool?.type)?.title || tool?.type || "Tool";
+}
+
+function toolDisplayName(tool) {
+  const title = toolTypeName(tool);
+  const name = (tool?.name || "").trim();
+  if (!name || (name === "Camera" && tool?.type !== "camera")) return title;
+  return name;
+}
+
 function cameraTool() {
   return tools().find((tool) => tool.type === "camera") || null;
 }
@@ -118,7 +129,7 @@ function renderFlow() {
     ? list.map((tool, i) => `
         <li class="${tool.id === state.selectedId || tool.id === state.outputId ? "selected" : ""}" data-id="${tool.id}">
           <div>
-            <b>${i + 1}. ${escapeHtml(tool.name)}</b>
+            <b>${i + 1}. ${escapeHtml(toolDisplayName(tool))}</b>
             <span>${escapeHtml(specFor(tool.type)?.title || tool.type)}</span>
           </div>
           ${editing ? `<div class="flow-actions">
@@ -136,7 +147,7 @@ function renderEditor() {
   $("editFlowList").innerHTML = list.length
     ? list.map((tool, i) => `
         <li class="${tool.id === state.selectedId ? "selected" : ""}" data-id="${tool.id}">
-          <b>${i + 1}. ${escapeHtml(tool.name)}</b>
+          <b>${i + 1}. ${escapeHtml(toolDisplayName(tool))}</b>
           <span>${escapeHtml(specFor(tool.type)?.title || tool.type)}</span>
           <div class="flow-actions">
             <button type="button" data-up="${tool.id}" ${i === 0 ? "disabled" : ""}>Up</button>
@@ -183,6 +194,7 @@ function renderOptionsInto(panel) {
   if (!panel) return;
   const tool = selectedTool();
   if (!tool) {
+    delete panel.dataset.toolId;
     panel.innerHTML = `<div class="empty">Select a tool, or add one from the list.</div>`;
     return;
   }
@@ -201,7 +213,9 @@ function renderOptionsInto(panel) {
       ? fieldHtml(tool, active.field)
       : active.panel
         ? panelHtml(tool, active.panel)
-        : `<label>Name<input id="toolName" type="text" value="${escapeHtml(tool.name)}" /></label>`;
+        : `<label>Name<input data-name type="text" value="${escapeHtml(toolDisplayName(tool))}" placeholder="${escapeHtml(spec.title)}" /></label>`;
+  panel.dataset.toolId = tool.id;
+  if (!(tool.name || "").trim() || (tool.name === "Camera" && tool.type !== "camera")) tool.name = spec.title;
   panel.innerHTML = `
     <div class="opt">
       <div class="opt-head"><h2>${escapeHtml(spec.title)}</h2><span id="saveState"></span></div>
@@ -220,7 +234,7 @@ function toolOutputHtml(tool) {
   if (!result) return `<p class="hint">Measure to see this tool's output.</p>`;
   const image = toolImage(result);
   const img = image
-    ? `<img class="tool-output-img" src="${image}" alt="Output of ${escapeHtml(tool.name)}" />`
+    ? `<img class="tool-output-img" src="${image}" alt="Output of ${escapeHtml(toolDisplayName(tool))}" />`
     : "";
   return `<div class="tool-output">${img}<p>${escapeHtml(toolDetail(result))}</p></div>`;
 }
@@ -320,10 +334,12 @@ function roiText(roi) {
 function readOptionsIntoTool() {
   const tool = selectedTool();
   if (!tool) return;
-  const name = $("toolName");
-  if (name) tool.name = name.value.trim() || tool.name;
+  const root = [...document.querySelectorAll("[data-tool-id]")].find((el) => el.dataset.toolId === tool.id);
+  if (!root) return;
+  const name = root.querySelector("[data-name]");
+  if (name) tool.name = name.value.trim() || toolTypeName(tool);
   tool.config = tool.config || {};
-  document.querySelectorAll("#toolPanel [data-key]").forEach((el) => {
+  root.querySelectorAll("[data-key]").forEach((el) => {
     const key = el.dataset.key;
     tool.config[key] = el.type === "range" ? Number(el.value) : el.value;
   });
@@ -842,7 +858,7 @@ function showToolOutput(id, options = {}) {
       $("verdict").textContent = result.judgment || "--";
       $("elapsed").textContent = `${Number(result.elapsed_ms || 0).toFixed(1)} ms`;
       $("verdictMsg").textContent = toolDetail(result);
-      $("imageName").textContent = `${flowTool?.name || result.name} output`;
+      $("imageName").textContent = `${toolDisplayName(flowTool || result)} output`;
     } else if (flowTool) {
       $("imageName").textContent = flowTool.name;
       $("verdictMsg").textContent = "Measure to see this tool's output.";
@@ -933,7 +949,7 @@ function toolDetail(tool) {
 function toolCard(tool) {
   const cls = (tool.judgment || "").toLowerCase();
   const selected = tool.id === state.outputId ? " selected" : "";
-  return `<div class="card ${cls}${selected}" data-tool="${tool.id}"><div class="row"><b>${escapeHtml(tool.name)}</b><span class="tag ${cls}">${tool.judgment || ""}</span></div><small>${escapeHtml(toolDetail(tool))}</small></div>`;
+  return `<div class="card ${cls}${selected}" data-tool="${tool.id}"><div class="row"><b>${escapeHtml(toolDisplayName(tool))}</b><span class="tag ${cls}">${tool.judgment || ""}</span></div><small>${escapeHtml(toolDetail(tool))}</small></div>`;
 }
 
 function renderBatch(data) {
