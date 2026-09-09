@@ -7,54 +7,134 @@ import numpy as np
 
 from app.core.features import apply_roi
 
-_qr = cv2.QRCodeDetector()
-_qr_lock = __import__("threading").Lock()
+_zxing = None
+_zxing_error = ""
 
-try:
-    from pyzbar.pyzbar import decode as zbar_decode  # type: ignore
+# UI value -> zxing BarcodeFormat names. LinearCodes covers all 1D barcodes.
+_FORMAT_NAMES = {
+    "auto": ("Any",),
+    "qr": ("QRCode", "MicroQRCode"),
+    "datamatrix": ("DataMatrix",),
+    "aztec": ("Aztec",),
+    "pdf417": ("PDF417",),
+    "barcode": ("LinearCodes",),
+    "code128": ("Code128",),
+    "code39": ("Code39",),
+    "code93": ("Code93",),
+    "ean13": ("EAN13",),
+    "ean8": ("EAN8",),
+    "upca": ("UPCA",),
+    "upce": ("UPCE",),
+    "itf": ("ITF",),
+    "codabar": ("Codabar",),
+}
 
-    _HAS_ZBAR = True
-except Exception:
-    zbar_decode = None
-    _HAS_ZBAR = False
+_LABELS = {
+    "auto": "Any",
+    "qr": "QR",
+    "datamatrix": "Data Matrix",
+    "aztec": "Aztec",
+    "pdf417": "PDF417",
+    "barcode": "Barcode",
+    "code128": "Code 128",
+    "code39": "Code 39",
+    "code93": "Code 93",
+    "ean13": "EAN-13",
+    "ean8": "EAN-8",
+    "upca": "UPC-A",
+    "upce": "UPC-E",
+    "itf": "ITF",
+    "codabar": "Codabar",
+}
 
 
-def zbar_available() -> bool:
-    return _HAS_ZBAR
+def code_types() -> list[dict]:
+    return [{"value": key, "label": _LABELS[key]} for key in _FORMAT_NAMES]
 
 
-def _decode_qr(gray: np.ndarray) -> list[dict]:
-    found: list[dict] = []
-    with _qr_lock:
-        try:
-            ok, infos, points, _ = _qr.detectAndDecodeMulti(gray)
-        except Exception:
-            ok, infos, points = False, [], None
-        if ok and infos is not None:
-            for text in infos:
-                value = (text or "").strip()
-                if value:
-                    found.append({"type": "QR", "value": value})
-        if not found:
-            value, _points, _ = _qr.detectAndDecode(gray)
-            value = (value or "").strip()
-            if value:
-                found.append({"type": "QR", "value": value})
-    return found
-
-
-def _decode_zbar(gray: np.ndarray) -> list[dict]:
-    if not _HAS_ZBAR or zbar_decode is None:
-        return []
-    found: list[dict] = []
+def reader_available() -> bool:
     try:
-        for item in zbar_decode(gray):
-            value = item.data.decode("utf-8", errors="replace").strip()
-            if not value:
-                continue
-            found.append({"type": str(item.type), "value": value})
+        _library()
+        return True
     except Exception:
-        return []
+        return False
+
+
+def _library():
+    global _zxing, _zxing_error
+    if _zxing is not None:
+        return _zxing
+    if _zxing_error:
+        raise RuntimeError(_zxing_error)
+    try:
+        import zxingcpp
+    except ImportError as exc:
+        _zxing_error = "Code reader is missing. Run: pip install zxing-cpp"
+        raise RuntimeError(_zxing_error) from exc
+    _zxing = zxingcpp
+    return _zxing
+
+
+def _key(symbology: str) -> str:
+    key = (symbology or "auto").strip().lower().replace(" ", "").replace("-", "").replace("_", "")
+    aliases = {"datamatix": "datamatrix", "qrcode": "qr", "1d": "barcode", "linear": "barcode"}
+    key = aliases.get(key, key)
+    return key if key in _FORMAT_NAMES else "auto"
+
+
+def _formats(symbology: str):
+    zxingcpp = _library()
+    names = _FORMAT_NAMES[_key(symbology)]
+    flags = None
+    for name in names:
+        item = getattr(zxingcpp.BarcodeFormat, name, None)
+        if item is None:
+            continue
+        flags = item if flags is None else flags | item
+    if flags is None and _key(symbology) == "barcode":
+        for name in ("Code128", "Code39", "Code93", "EAN13", "EAN8", "UPCA", "UPCE", "ITF", "Codabar"):
+            item = getattr(zxingcpp.BarcodeFormat, name, None)
+            if item is None:
+                continue
+            flags = item if flags is None else flags | item
+    return flags
+
+
+def _type_name(fmt) -> str:
+    text = str(fmt)
+    if "." in text:
+        text = text.rsplit(".", 1)[-1]
+    return {
+        "QRCode": "QR",
+        "MicroQRCode": "QR",
+        "DataMatrix": "DataMatrix",
+        "PDF417": "PDF417",
+        "Code128": "Code128",
+        "Code39": "Code39",
+        "Code93": "Code93",
+        "EAN13": "EAN13",
+        "EAN8": "EAN8",
+        "UPCA": "UPCA",
+        "UPCE": "UPCE",
+    }.get(text, text)
+
+
+def _decode(gray: np.ndarray, symbology: str) -> list[dict]:
+    zxingcpp = _library()
+    flags = _formats(symbology)
+    kwargs = {"try_rotate": False, "try_downscale": True}
+    if flags is not None and _key(symbology) != "auto":
+        kwargs["formats"] = flags
+    try:
+        results = zxingcpp.read_barcodes(gray, **kwargs)
+    except TypeError:
+        results = zxingcpp.read_barcodes(gray)
+    found = []
+    for item in results or []:
+        value = str(getattr(item, "text", "") or "").strip()
+        if not value:
+            continue
+        found.append({"type": _type_name(getattr(item, "format", "")), "value": value})
     return found
 
 
@@ -77,17 +157,24 @@ def read_codes(
     symbology: str = "auto",
 ) -> dict:
     started = time.perf_counter()
-    cropped = apply_roi(image, roi)
-    gray = cropped if cropped.ndim == 2 else cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY)
-
-    codes = _decode_qr(gray)
-    want = symbology.upper()
-    if want in {"AUTO", "BARCODE", "1D", "DATAMATRIX"} or not codes:
-        codes.extend(_decode_zbar(gray))
-    codes = _unique(codes)
-
-    if want not in {"", "AUTO"}:
-        codes = [c for c in codes if c["type"].upper() == want or (want == "BARCODE" and c["type"].upper() != "QR")]
+    kind = _key(symbology)
+    label = _LABELS[kind]
+    try:
+        cropped = apply_roi(image, roi)
+        gray = cropped if cropped.ndim == 2 else cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY)
+        codes = _unique(_decode(gray, kind))
+        if not codes:
+            codes = _unique(_decode(255 - gray, kind))
+    except Exception as exc:
+        return {
+            "judgment": "NG",
+            "codes": [],
+            "expected": expected,
+            "symbology": kind,
+            "available": False,
+            "message": str(exc),
+            "elapsed_ms": (time.perf_counter() - started) * 1000.0,
+        }
 
     values = [c["value"] for c in codes]
     expected_text = (expected or "").strip()
@@ -96,16 +183,16 @@ def read_codes(
     else:
         passed = len(values) > 0
 
-    message = ""
-    if not codes and not _HAS_ZBAR:
-        message = "No QR found. Install pyzbar for 1D barcode and DataMatrix."
+    message = ", ".join(f"{c['type']}: {c['value']}" for c in codes)
+    if not codes:
+        message = f"No {label} code"
 
     return {
         "judgment": "OK" if passed else "NG",
         "codes": codes,
         "expected": expected,
-        "symbology": symbology,
-        "zbar": _HAS_ZBAR,
+        "symbology": kind,
+        "available": True,
         "message": message,
         "elapsed_ms": (time.perf_counter() - started) * 1000.0,
     }

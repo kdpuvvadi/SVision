@@ -2,27 +2,23 @@ from __future__ import annotations
 
 import numpy as np
 
-from app.core.code_tool import read_codes, zbar_available
+from app.core.code_tool import code_types, read_codes, reader_available
 from app.tools.base import Tool
 
 
 class CodeTool(Tool):
     type = "code"
     title = "Code Read"
-    summary = "Read a QR or barcode in this tool's own region."
+    summary = "Read the selected code type in this tool's region."
 
     def fields(self) -> list[dict]:
         return [
             {"key": "expected", "label": "Expected value", "kind": "text", "placeholder": "Leave empty to require any code"},
             {
                 "key": "symbology",
-                "label": "Symbology",
+                "label": "Code type",
                 "kind": "select",
-                "options": [
-                    {"value": "auto", "label": "Auto"},
-                    {"value": "QR", "label": "QR"},
-                    {"value": "barcode", "label": "Barcode"},
-                ],
+                "options": code_types(),
             },
             {"key": "roi", "label": "Region", "kind": "roi"},
         ]
@@ -31,9 +27,9 @@ class CodeTool(Tool):
         return {"expected": "", "symbology": "auto", "roi": None}
 
     def status(self) -> str:
-        if zbar_available():
-            return "QR and barcode readers are available."
-        return "QR works now. pyzbar adds 1D barcodes."
+        if reader_available():
+            return "Choose QR, Data Matrix, barcode, or another type. Only that type is read."
+        return "Code reader is missing. Run: pip install zxing-cpp"
 
     def run(self, image: np.ndarray, tool: dict, project_id: str, ctx: dict | None = None) -> tuple[dict, np.ndarray | None]:
         cfg = tool.get("config") or {}
