@@ -27,7 +27,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from app.config import DATA_DIR, HOST, PORT, ROOT, THREAD_COUNT, app_version, ensure_dirs, lan_addresses
+from app.config import DATA_DIR, HOST, MAX_UPLOAD_MB, PORT, ROOT, THREAD_COUNT, app_version, ensure_dirs, lan_addresses
 from app.core.camera import ImageSource, camera_from_project
 from app.core.handshake import handshake
 from app.core.plc_runtime import plc_runtime
@@ -217,6 +217,37 @@ def delete_project(project_id: str) -> dict:
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
     return {"ok": True}
+
+
+@app.get("/api/projects/{project_id}/export")
+def export_project(project_id: str) -> Response:
+    try:
+        payload, filename = store.export_project_archive(project_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    return Response(content=payload, media_type="application/octet-stream", headers=headers)
+
+
+@app.post("/api/projects/import")
+async def import_project(
+    file: UploadFile = File(...),
+    name: str | None = Form(default=None),
+) -> dict:
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(400, "Empty file.")
+    if len(raw) > MAX_UPLOAD_MB * 1024 * 1024:
+        raise HTTPException(400, f"Archive larger than {MAX_UPLOAD_MB} MB.")
+    filename = (file.filename or "").lower()
+    if filename and not (filename.endswith(".svision") or filename.endswith(".zip")):
+        raise HTTPException(400, "Choose a .svision scene archive.")
+    try:
+        return store.import_project_archive(raw, name)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.post("/api/projects/{project_id}/tools")

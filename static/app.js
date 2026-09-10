@@ -686,6 +686,25 @@ function bind() {
     state.project = null;
     await loadProjects();
   });
+  $("exportProject").addEventListener("click", () => {
+    if (!state.project?.id) return;
+    window.location.href = `/api/projects/${state.project.id}/export`;
+  });
+  $("importProject").addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const body = new FormData();
+      body.append("file", file, file.name);
+      const res = await fetch("/api/projects/import", { method: "POST", body });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || res.statusText);
+      await loadProjects(data.id);
+    } catch (err) {
+      alert(err.message || String(err));
+    }
+  });
 
   $("flowList").addEventListener("click", async (e) => {
     const up = e.target.dataset.up;

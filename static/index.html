@@ -40,6 +40,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
     <button id="newProject" class="edit-only" type="button">New</button>
     <button id="renameProject" class="edit-only" type="button">Rename</button>
     <button id="deleteProject" class="edit-only danger" type="button">Delete</button>
+    <button id="exportProject" class="edit-only" type="button">Export</button>
+    <label class="file-btn edit-only" id="importProjectLabel">Import<input id="importProject" type="file" accept=".svision,application/octet-stream" hidden /></label>
     <span class="layout-badge" id="layoutBadge">Layout: <b id="layoutName">Inspection</b></span>
     <button id="switchLayout" type="button">Switch layout</button>
     <button id="plcSettingsBtn" type="button">PLC</button>
@@ -157,6 +159,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
       </div>
     </section>
   </main>
-  <script src="/static/app.js?v=28"></script>
+  <script src="/static/app.js?v=29"></script>
 </body>
 </html>

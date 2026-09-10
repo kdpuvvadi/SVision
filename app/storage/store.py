@@ -17,11 +17,15 @@
 
 from __future__ import annotations
 
+import io
 import json
+import re
 import shutil
+import tempfile
 import threading
 import time
 import uuid
+import zipfile
 from pathlib import Path
 
 import cv2
@@ -32,6 +36,9 @@ from app.core.classifier import SampleModel
 from app.tools.registry import get_tool, new_tool, normalize_config
 
 _lock = threading.RLock()
+SVISION_FORMAT = "svision-scene"
+SVISION_VERSION = 1
+_SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 def default_flow() -> dict:
@@ -275,6 +282,134 @@ class ProjectStore:
                 raise FileNotFoundError("Project not found.")
             self._drop_project_models(project_id)
             shutil.rmtree(folder)
+
+    def export_project_archive(self, project_id: str) -> tuple[bytes, str]:
+        """Pack the scene folder into a .svision zip. Returns (bytes, download_name)."""
+        folder = _project_dir(project_id)
+        meta_path = folder / "project.json"
+        if not meta_path.exists():
+            raise FileNotFoundError("Project not found.")
+        data = _read_json(meta_path)
+        name = str(data.get("name") or "scene").strip() or "scene"
+        safe = _SAFE_NAME.sub("_", name).strip("._") or "scene"
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(
+                "svision.json",
+                json.dumps(
+                    {
+                        "format": SVISION_FORMAT,
+                        "version": SVISION_VERSION,
+                        "name": name,
+                        "exported_id": project_id,
+                        "exported_at": _now(),
+                    },
+                    indent=2,
+                ),
+            )
+            for path in sorted(folder.rglob("*")):
+                if not path.is_file():
+                    continue
+                rel = path.relative_to(folder).as_posix()
+                if rel in {"svision.json"}:
+                    continue
+                zf.write(path, rel)
+        return buf.getvalue(), f"{safe}.svision"
+
+    def import_project_archive(self, raw: bytes, name: str | None = None) -> dict:
+        """Import a .svision (zip) archive as a new scene with a fresh id."""
+        if not raw:
+            raise ValueError("Empty archive.")
+        with tempfile.TemporaryDirectory(prefix="svision-import-") as tmp:
+            root = Path(tmp)
+            try:
+                with zipfile.ZipFile(io.BytesIO(raw), "r") as zf:
+                    self._safe_extract(zf, root)
+            except zipfile.BadZipFile as exc:
+                raise ValueError("Not a valid .svision archive.") from exc
+            scene_root = self._find_scene_root(root)
+            meta_path = scene_root / "project.json"
+            if not meta_path.exists():
+                raise ValueError("Archive is missing project.json.")
+            data = _read_json(meta_path)
+            if not isinstance(data, dict):
+                raise ValueError("Invalid project.json.")
+            marker = root / "svision.json"
+            if not marker.exists() and (scene_root / "svision.json").exists():
+                marker = scene_root / "svision.json"
+            if marker.exists():
+                try:
+                    info = _read_json(marker)
+                except Exception as exc:
+                    raise ValueError("Invalid svision.json.") from exc
+                fmt = info.get("format")
+                if fmt and fmt != SVISION_FORMAT:
+                    raise ValueError("Unsupported .svision format.")
+                try:
+                    ver = int(info.get("version", 1))
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("Invalid archive version.") from exc
+                if ver > SVISION_VERSION:
+                    raise ValueError("This .svision file needs a newer SVision.")
+
+            new_id = uuid.uuid4().hex[:12]
+            now = _now()
+            data["id"] = new_id
+            if name and name.strip():
+                data["name"] = name.strip()
+            else:
+                data["name"] = str(data.get("name") or "Imported scene").strip() or "Imported scene"
+            data["created"] = now
+            data["updated"] = now
+            data["flow"] = data.get("flow") or default_flow()
+            tools = []
+            for tool in data["flow"].get("tools") or []:
+                try:
+                    tools.append(normalize_config(tool))
+                except KeyError:
+                    continue
+            data["flow"]["tools"] = tools
+            data.setdefault("camera", {"type": "upload", "gige_ip": ""})
+
+            dest = _project_dir(new_id)
+            if dest.exists():
+                raise RuntimeError("Project id collision; try again.")
+            with _lock:
+                shutil.copytree(scene_root, dest, ignore=shutil.ignore_patterns("svision.json"))
+                _write_json(dest / "project.json", data)
+                (dest / "tools").mkdir(parents=True, exist_ok=True)
+                for tool in tools:
+                    self._ensure_tool(new_id, tool["id"])
+                return self._public(data)
+
+    @staticmethod
+    def _safe_extract(zf: zipfile.ZipFile, dest: Path) -> None:
+        dest = dest.resolve()
+        for info in zf.infolist():
+            name = info.filename.replace("\\", "/")
+            if not name or name.endswith("/"):
+                continue
+            if name.startswith("/") or ".." in Path(name).parts:
+                raise ValueError("Archive contains unsafe paths.")
+            target = (dest / name).resolve()
+            if not str(target).startswith(str(dest)):
+                raise ValueError("Archive contains unsafe paths.")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(info, "r") as src, open(target, "wb") as out:
+                shutil.copyfileobj(src, out)
+
+    @staticmethod
+    def _find_scene_root(extracted: Path) -> Path:
+        direct = extracted / "project.json"
+        if direct.exists():
+            return extracted
+        candidates = [p for p in extracted.iterdir() if p.is_dir() and (p / "project.json").exists()]
+        if len(candidates) == 1:
+            return candidates[0]
+        nested = list(extracted.rglob("project.json"))
+        if len(nested) == 1:
+            return nested[0].parent
+        raise ValueError("Could not find a scene in the archive.")
 
     def add_samples(self, project_id: str, tool_id: str, label: str, files: list[tuple[str, bytes]]) -> list[dict]:
         label = label.strip().upper()
