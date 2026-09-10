@@ -61,13 +61,14 @@ button.danger { background: #5a2430; border-color: #8a3344; }
 .topbar {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
+  flex-wrap: nowrap;
+  gap: 8px;
   padding: 8px 12px;
   background: linear-gradient(#0a63b8, #0856a0);
   border-bottom: 1px solid #084e90;
+  min-height: 54px;
 }
-.brand { display: flex; align-items: center; gap: 8px; min-width: 140px; }
+.brand { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; min-width: 0; }
 .brand strong { display: block; }
 .brand small { color: #d5e8ff; }
 .mark {
@@ -76,8 +77,43 @@ button.danger { background: #5a2430; border-color: #8a3344; }
   border-radius: 6px;
   background: #062a4d;
   font-weight: 700;
+  flex: 0 0 auto;
 }
-.project-pick { display: flex; align-items: center; gap: 6px; color: #e7f3ff; }
+.project-pick {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #e7f3ff;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.project-pick select {
+  max-width: 160px;
+  min-width: 96px;
+}
+.topbar-tools {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  -webkit-overflow-scrolling: touch;
+}
+.topbar-tools > button,
+.topbar-tools > .file-btn,
+.topbar-tools > .layout-badge {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.topbar-tools button,
+.topbar-tools .file-btn {
+  padding: 6px 10px;
+}
+.topbar .label-short { display: none; }
 select, input[type="text"] {
   background: #111518;
   border: 1px solid #4d5966;
@@ -85,7 +121,7 @@ select, input[type="text"] {
   padding: 6px 8px;
 }
 .layout-badge {
-  margin-left: 8px;
+  margin-left: 0;
   padding: 6px 10px;
   background: #062a4d;
   border: 1px solid #9fd0ff;
@@ -127,7 +163,17 @@ body.flow-open.tool-settings .stage-bar { display: none; }
 #flowEditBox { margin-bottom: 12px; }
 #sceneSaveState { display: block; margin-top: 6px; color: var(--ok); font-size: 12px; }
 #flowList li { cursor: pointer; }
-.host { margin-left: auto; color: #d7ebff; font-size: 12px; text-align: right; }
+.host {
+  margin-left: auto;
+  color: #d7ebff;
+  font-size: 12px;
+  text-align: right;
+  flex: 0 0 auto;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 main { height: calc(100% - 54px); }
 .view { display: none; height: 100%; }
@@ -416,6 +462,9 @@ article header label { flex-direction: row; align-items: center; color: var(--te
     grid-template-columns: 200px minmax(260px, 1fr) 260px;
   }
   .host { display: none; }
+  .layout-badge { display: none; }
+  .topbar .label-full { display: none; }
+  .topbar .label-short { display: inline; }
 }
 
 /* Tablet: preview on top, flow + judge below */
@@ -442,8 +491,9 @@ article header label { flex-direction: row; align-items: center; color: var(--te
     border-left: 1px solid var(--line);
     border-top: 1px solid var(--line);
   }
-  .layout-badge { display: none; }
-  .brand { min-width: 0; }
+  .brand div { display: none; }
+  .project-pick { font-size: 0; gap: 0; }
+  .project-pick select { font-size: 14px; max-width: 140px; }
   .verdict { font-size: 52px; }
   .elapsed { font-size: 22px; }
   .sample-grid { grid-template-columns: 1fr; }
@@ -460,7 +510,18 @@ article header label { flex-direction: row; align-items: center; color: var(--te
     min-height: calc(100vh - 72px);
     overflow: visible;
   }
-  .topbar { max-height: none; }
+  .topbar {
+    padding: 6px 8px;
+    gap: 6px;
+  }
+  .topbar-tools {
+    gap: 4px;
+  }
+  .topbar-tools button,
+  .topbar-tools .file-btn {
+    padding: 5px 8px;
+    font-size: 13px;
+  }
   #inspect.active,
   body.mode-edit #inspect.active {
     height: auto;
@@ -480,8 +541,7 @@ article header label { flex-direction: row; align-items: center; color: var(--te
     border-top: 1px solid var(--line);
   }
   .brand small { display: none; }
-  .project-pick { width: 100%; }
-  .project-pick select { flex: 1; min-width: 0; }
+  .project-pick select { max-width: 120px; }
   .verdict { font-size: 44px; }
   .elapsed { font-size: 18px; }
 }

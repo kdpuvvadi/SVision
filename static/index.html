@@ -22,7 +22,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>SVision</title>
-  <link rel="stylesheet" href="/static/styles.css?v=23" />
+  <link rel="stylesheet" href="/static/styles.css?v=24" />
 </head>
 <body class="mode-inspect">
   <header class="topbar">
@@ -37,15 +37,17 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
       Scene
       <select id="projectSelect"></select>
     </label>
-    <button id="newProject" class="edit-only" type="button">New</button>
-    <button id="renameProject" class="edit-only" type="button">Rename</button>
-    <button id="deleteProject" class="edit-only danger" type="button">Delete</button>
-    <button id="exportProject" class="edit-only" type="button">Export</button>
-    <label class="file-btn edit-only" id="importProjectLabel">Import<input id="importProject" type="file" accept=".svision,application/octet-stream" hidden /></label>
-    <span class="layout-badge" id="layoutBadge">Layout: <b id="layoutName">Inspection</b></span>
-    <button id="switchLayout" type="button">Switch layout</button>
-    <button id="plcSettingsBtn" class="edit-only" type="button">PLC</button>
-    <button id="docsBtn" class="edit-only" type="button">Docs</button>
+    <div class="topbar-tools">
+      <button id="newProject" class="edit-only" type="button">New</button>
+      <button id="renameProject" class="edit-only" type="button">Rename</button>
+      <button id="deleteProject" class="edit-only danger" type="button">Delete</button>
+      <button id="exportProject" class="edit-only" type="button">Export</button>
+      <label class="file-btn edit-only" id="importProjectLabel">Import<input id="importProject" type="file" accept=".svision,application/octet-stream" hidden /></label>
+      <span class="layout-badge" id="layoutBadge">Layout: <b id="layoutName">Inspection</b></span>
+      <button id="switchLayout" type="button"><span class="label-full">Switch layout</span><span class="label-short">Layout</span></button>
+      <button id="plcSettingsBtn" class="edit-only" type="button">PLC</button>
+      <button id="docsBtn" class="edit-only" type="button">Docs</button>
+    </div>
     <div class="host" id="hostInfo">Starting…</div>
   </header>
 
