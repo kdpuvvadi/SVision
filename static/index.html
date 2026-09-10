@@ -22,7 +22,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>SVision</title>
-  <link rel="stylesheet" href="/static/styles.css?v=19" />
+  <link rel="stylesheet" href="/static/styles.css?v=22" />
 </head>
 <body class="mode-inspect">
   <header class="topbar">
@@ -42,8 +42,43 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
     <button id="deleteProject" class="edit-only danger" type="button">Delete</button>
     <span class="layout-badge" id="layoutBadge">Layout: <b id="layoutName">Inspection</b></span>
     <button id="switchLayout" type="button">Switch layout</button>
+    <button id="plcSettingsBtn" type="button">PLC</button>
+    <button id="docsBtn" type="button">Docs</button>
     <div class="host" id="hostInfo">Starting…</div>
   </header>
+
+  <div id="plcModal" class="modal" hidden>
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2>PLC handshake</h2>
+        <button id="plcClose" type="button">Close</button>
+      </div>
+      <p class="hint">Measure runs on a worker thread. Modbus TCP and OPC UA share the same TRIGGER / OK / NG bits. See <a href="/plc-docs" target="_blank" rel="noopener">PLC documentation</a>.</p>
+      <label>Production scene
+        <select id="plcProject"></select>
+      </label>
+      <label>Result pulse (ms)
+        <input id="plcDonePulse" type="number" min="10" max="2000" step="10" />
+      </label>
+      <p class="hint">Pulse width for DONE + OK / NG / ERROR coils. Holding registers (elapsed / judgment) stay until the next measure.</p>
+      <fieldset>
+        <legend>Modbus TCP</legend>
+        <label class="check"><input id="plcModbusEnabled" type="checkbox" /> Enable</label>
+        <label>Bind host<input id="plcModbusHost" type="text" /></label>
+        <label>Port<input id="plcModbusPort" type="number" min="1" max="65535" /></label>
+        <label>Unit id<input id="plcModbusUnit" type="number" min="1" max="247" /></label>
+      </fieldset>
+      <fieldset>
+        <legend>OPC UA</legend>
+        <label class="check"><input id="plcOpcEnabled" type="checkbox" /> Enable</label>
+        <label>Endpoint<input id="plcOpcEndpoint" type="text" /></label>
+      </fieldset>
+      <div id="plcStatus" class="plc-status hint"></div>
+      <div class="modal-actions">
+        <button id="plcSave" type="button" class="primary">Save</button>
+      </div>
+    </div>
+  </div>
 
   <main>
     <section id="inspect" class="view active">
@@ -122,6 +157,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
       </div>
     </section>
   </main>
-  <script src="/static/app.js?v=24"></script>
+  <script src="/static/app.js?v=28"></script>
 </body>
 </html>

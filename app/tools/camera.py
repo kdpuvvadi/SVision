@@ -38,8 +38,15 @@ class CameraTool(Tool):
                 "kind": "select",
                 "options": [
                     {"value": "upload", "label": "Upload image"},
+                    {"value": "usb", "label": "USB camera"},
                     {"value": "gige", "label": "GigE camera"},
                 ],
+            },
+            {
+                "key": "usb_index",
+                "label": "USB index",
+                "kind": "text",
+                "placeholder": "0",
             },
             {
                 "key": "gige_ip",
@@ -50,10 +57,10 @@ class CameraTool(Tool):
         ]
 
     def default_config(self) -> dict:
-        return {"source": "upload", "gige_ip": ""}
+        return {"source": "upload", "usb_index": "0", "gige_ip": ""}
 
     def status(self) -> str:
-        return "Required. Drop or choose images only after this tool is in the flow."
+        return "Upload for offline checks. USB / GigE for live PLC measure."
 
     def catalog(self) -> dict:
         data = super().catalog()
@@ -65,14 +72,24 @@ class CameraTool(Tool):
         started = time.perf_counter()
         cfg = tool.get("config") or {}
         source = cfg.get("source") or "upload"
-        if source == "gige":
+        if source == "gige" and (image is None or image.size == 0):
             ip = (cfg.get("gige_ip") or "").strip() or "no IP"
             return {
                 "id": tool.get("id"),
                 "type": self.type,
                 "name": tool.get("name") or self.title,
                 "judgment": "NG",
-                "message": f"GigE camera {ip} is not connected.",
+                "message": f"GigE camera {ip} produced no frame.",
+                "source": source,
+                "elapsed_ms": (time.perf_counter() - started) * 1000.0,
+            }, None
+        if source == "usb" and (image is None or image.size == 0):
+            return {
+                "id": tool.get("id"),
+                "type": self.type,
+                "name": tool.get("name") or self.title,
+                "judgment": "NG",
+                "message": f"USB camera index {cfg.get('usb_index') or 0} produced no frame.",
                 "source": source,
                 "elapsed_ms": (time.perf_counter() - started) * 1000.0,
             }, None
@@ -87,12 +104,13 @@ class CameraTool(Tool):
                 "elapsed_ms": (time.perf_counter() - started) * 1000.0,
             }, None
         h, w = image.shape[:2]
+        label = "Upload" if source == "upload" else source.upper()
         return {
             "id": tool.get("id"),
             "type": self.type,
             "name": tool.get("name") or self.title,
             "judgment": "OK",
-            "message": f"Upload  {w}×{h}",
+            "message": f"{label}  {w}×{h}",
             "source": source,
             "elapsed_ms": (time.perf_counter() - started) * 1000.0,
         }, None

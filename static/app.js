@@ -32,6 +32,8 @@ const state = {
   resultIndex: 0,
   zoom: { scale: 1, x: 0, y: 0, drag: null },
   drawing: null,
+  plcMeasureSeq: null,
+  plcBusyUi: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -71,6 +73,10 @@ function cameraTool() {
 }
 
 function imageInputReady() {
+  return !!cameraTool();
+}
+
+function cameraIsUpload() {
   const camera = cameraTool();
   return !!camera && (camera.config?.source || "upload") === "upload";
 }
@@ -104,6 +110,7 @@ async function boot() {
   }
   await loadProjects();
   bind();
+  startPlcLiveFeed();
 }
 
 function renderCatalog() {
@@ -382,22 +389,26 @@ function readOptionsIntoTool() {
 function updateImageInput() {
   const camera = cameraTool();
   const ready = imageInputReady();
+  const upload = cameraIsUpload();
   const zone = $("dropZone");
   const fileBtn = $("inspectFiles")?.closest(".file-btn");
   const run = $("runInspect");
   zone.classList.toggle("locked", !ready);
-  if (fileBtn) fileBtn.classList.toggle("disabled", !ready);
+  if (fileBtn) fileBtn.classList.toggle("disabled", !ready || !upload);
   if (run) run.disabled = !ready;
-  $("inspectFiles").disabled = !ready;
+  $("inspectFiles").disabled = !ready || !upload;
   if ($("preview").src && !$("preview").hidden) return;
   if (!camera) {
     $("emptyTitle").textContent = "Add a Camera tool";
     $("emptyDetail").textContent = "Image input is available only after Camera is in the flow.";
+  } else if ((camera.config?.source || "upload") === "usb") {
+    $("emptyTitle").textContent = "USB camera";
+    $("emptyDetail").textContent = `Live grab from USB index ${camera.config?.usb_index || 0}. Measure runs on the worker thread.`;
   } else if ((camera.config?.source || "upload") === "gige") {
     $("emptyTitle").textContent = "GigE camera";
     $("emptyDetail").textContent = camera.config?.gige_ip
-      ? `Camera ${camera.config.gige_ip} is not connected.`
-      : "Set the GigE IP on the Camera tool. The camera is not connected.";
+      ? `Live grab from ${camera.config.gige_ip}. Measure runs on the worker thread.`
+      : "Set the GigE IP on the Camera tool.";
   } else {
     $("emptyTitle").textContent = "Drop images here";
     $("emptyDetail").textContent = "Or choose files. This Camera tool uses uploaded images.";
@@ -463,6 +474,137 @@ async function persistLayout() {
   }
 }
 
+function plcDefaults() {
+  return {
+    production_project_id: state.project?.id || "",
+    done_pulse_ms: 80,
+    modbus: { enabled: false, host: "0.0.0.0", port: 1502, unit_id: 1 },
+    opcua: { enabled: false, endpoint: "opc.tcp://0.0.0.0:4840/svision/" },
+  };
+}
+
+async function openPlcSettings() {
+  const settings = await api("/api/settings");
+  state.settings = settings;
+  const plc = { ...plcDefaults(), ...(settings.plc || {}) };
+  plc.modbus = { ...plcDefaults().modbus, ...(plc.modbus || {}) };
+  plc.opcua = { ...plcDefaults().opcua, ...(plc.opcua || {}) };
+  const projects = state.projects.length ? state.projects : await api("/api/projects");
+  state.projects = projects;
+  $("plcProject").innerHTML = projects.map((p) =>
+    `<option value="${escapeHtml(p.id)}" ${p.id === plc.production_project_id ? "selected" : ""}>${escapeHtml(p.name)}</option>`
+  ).join("");
+  if (!plc.production_project_id && projects[0]) $("plcProject").value = projects[0].id;
+  $("plcDonePulse").value = plc.done_pulse_ms;
+  $("plcModbusEnabled").checked = !!plc.modbus.enabled;
+  $("plcModbusHost").value = plc.modbus.host || "0.0.0.0";
+  $("plcModbusPort").value = plc.modbus.port || 1502;
+  $("plcModbusUnit").value = plc.modbus.unit_id || 1;
+  $("plcOpcEnabled").checked = !!plc.opcua.enabled;
+  $("plcOpcEndpoint").value = plc.opcua.endpoint || "opc.tcp://0.0.0.0:4840/svision/";
+  await refreshPlcStatus();
+  $("plcModal").hidden = false;
+}
+
+async function refreshPlcStatus() {
+  try {
+    const status = await api("/api/plc/status");
+    const hs = status.handshake || {};
+    const mb = status.modbus || {};
+    const opc = status.opcua || {};
+    $("plcStatus").textContent = [
+      `Handshake  ready=${hs.ready} busy=${hs.busy} ok=${hs.ok} ng=${hs.ng} error=${hs.error}`,
+      `Modbus  running=${mb.running} ${mb.host || ""}:${mb.port || ""} ${mb.error || ""}`,
+      `OPC UA  running=${opc.running} ${opc.endpoint || ""} ${opc.error || ""}`,
+      hs.last_error ? `Last error: ${hs.last_error}` : "",
+    ].filter(Boolean).join("\n");
+  } catch (err) {
+    $("plcStatus").textContent = err.message;
+  }
+}
+
+function startPlcLiveFeed() {
+  if (state.plcFeedStarted) return;
+  state.plcFeedStarted = true;
+  const tick = async () => {
+    let busy = false;
+    try {
+      busy = await pollPlcLive();
+    } catch {
+      /* ignore poll errors */
+    }
+    state.plcFeedTimer = setTimeout(tick, busy ? 350 : 1200);
+  };
+  tick();
+}
+
+async function pollPlcLive() {
+  const status = await api("/api/plc/status");
+  const hs = status.handshake || {};
+  const prod = hs.production_project_id || "";
+  const viewingProd = !!state.project && prod && state.project.id === prod;
+  const seq = Number(hs.measure_seq || 0);
+
+  if (state.plcMeasureSeq === null) {
+    state.plcMeasureSeq = seq;
+  }
+
+  if (hs.busy && viewingProd) {
+    if (!state.plcBusyUi) {
+      state.plcBusyUi = true;
+      $("verdict").className = "verdict idle";
+      $("verdict").textContent = "…";
+      $("elapsed").textContent = "…";
+      $("verdictMsg").textContent = "PLC / Modbus / OPC measuring…";
+    }
+    return true;
+  }
+
+  if (state.plcBusyUi && !hs.busy) {
+    state.plcBusyUi = false;
+  }
+
+  if (!seq || seq === state.plcMeasureSeq) return !!hs.busy;
+  state.plcMeasureSeq = seq;
+
+  if (!viewingProd) return !!hs.busy;
+
+  if (hs.error || hs.judgment === "ERROR") {
+    $("verdict").className = "verdict ng";
+    $("verdict").textContent = "ERROR";
+    $("elapsed").textContent = `${Number(hs.elapsed_ms || 0).toFixed(0)} ms`;
+    $("verdictMsg").textContent = hs.last_error || "Measure failed.";
+    return false;
+  }
+
+  await restoreCurrentImage();
+  return false;
+}
+
+async function savePlcSettings() {
+  const plc = {
+    production_project_id: $("plcProject").value,
+    done_pulse_ms: Number($("plcDonePulse").value) || 80,
+    modbus: {
+      enabled: $("plcModbusEnabled").checked,
+      host: $("plcModbusHost").value.trim() || "0.0.0.0",
+      port: Number($("plcModbusPort").value) || 1502,
+      unit_id: Number($("plcModbusUnit").value) || 1,
+    },
+    opcua: {
+      enabled: $("plcOpcEnabled").checked,
+      endpoint: $("plcOpcEndpoint").value.trim() || "opc.tcp://0.0.0.0:4840/svision/",
+    },
+  };
+  state.settings = await api("/api/settings", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ plc }),
+  });
+  await refreshPlcStatus();
+  $("plcStatus").textContent += "\nSaved.";
+}
+
 function bind() {
   const saved = state.settings?.layout === "edit" ? "edit" : "inspect";
   state.flowOpen = saved === "edit" && !!state.settings?.flow_open;
@@ -493,6 +635,13 @@ function bind() {
     }
     showLayout("edit");
     persistLayout();
+  });
+  $("plcSettingsBtn").addEventListener("click", () => openPlcSettings().catch((err) => alert(err.message)));
+  $("docsBtn").addEventListener("click", () => { window.open("/plc-docs", "_blank", "noopener"); });
+  $("plcClose").addEventListener("click", () => { $("plcModal").hidden = true; });
+  $("plcSave").addEventListener("click", () => savePlcSettings().catch((err) => { $("plcStatus").textContent = err.message; }));
+  $("plcModal").addEventListener("click", (e) => {
+    if (e.target.id === "plcModal") $("plcModal").hidden = true;
   });
   $("saveFlowBtn").addEventListener("click", async () => {
     try {
@@ -775,7 +924,7 @@ function bind() {
   });
 
   $("inspectFiles").addEventListener("change", (e) => {
-    if (!imageInputReady()) return;
+    if (!imageInputReady() || !cameraIsUpload()) return;
     const files = [...e.target.files];
     e.target.value = "";
     if (files.length) selectImages(files);
@@ -792,7 +941,7 @@ function bind() {
     zone.classList.remove("drag");
   }));
   zone.addEventListener("drop", (e) => {
-    if (!imageInputReady()) return;
+    if (!imageInputReady() || !cameraIsUpload()) return;
     const files = [...e.dataTransfer.files].filter((f) => f.type.startsWith("image/"));
     if (!files.length) return;
     selectImages(files, { measure: true });
@@ -1061,22 +1210,23 @@ function showToolOutput(id, options = {}) {
 
 async function runInspect() {
   if (!imageInputReady()) {
-    $("verdictMsg").textContent = "Add a Camera tool set to Upload image.";
+    $("verdictMsg").textContent = "Add a Camera tool first.";
     return;
   }
-  if (!state.pendingFiles.length && !state.storedImage) {
+  if (cameraIsUpload() && !state.pendingFiles.length && !state.storedImage) {
     $("verdictMsg").textContent = "Choose or drop images first.";
     return;
   }
   $("runInspect").disabled = true;
   $("verdict").className = "verdict idle";
   $("verdict").textContent = "…";
+  $("verdictMsg").textContent = "Measuring on worker thread…";
   try {
     const body = new FormData();
     state.pendingFiles.forEach((f) => body.append("files", f));
     const data = await api(`/api/projects/${state.project.id}/inspect`, { method: "POST", body });
     state.pendingFiles = [];
-    state.storedImage = true;
+    state.storedImage = cameraIsUpload() || state.storedImage;
     state.lastResults = data.results;
     showResult(0);
     renderBatch(data);

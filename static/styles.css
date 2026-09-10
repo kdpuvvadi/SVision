@@ -250,12 +250,9 @@ main { height: calc(100% - 54px); }
 .card {
   background: var(--panel-2);
   border: 1px solid var(--line);
-  border-left: 4px solid #667;
   border-radius: 6px;
   padding: 8px;
 }
-.card.ok { border-left-color: var(--ok); }
-.card.ng { border-left-color: var(--ng); }
 .card .row { display: flex; justify-content: space-between; gap: 8px; }
 .card small { color: var(--muted); }
 
@@ -372,6 +369,43 @@ article header label { flex-direction: row; align-items: center; color: var(--te
   place-items: center;
 }
 #roiCanvas { max-width: 100%; cursor: crosshair; }
+
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: grid;
+  place-items: center;
+  z-index: 40;
+  padding: 16px;
+}
+.modal[hidden] { display: none; }
+.modal-card {
+  width: min(560px, 100%);
+  max-height: min(90vh, 720px);
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.modal-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.modal-card label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 13px; }
+.modal-card label.check { flex-direction: row; align-items: center; gap: 8px; color: var(--text); }
+.modal-card fieldset {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.modal-card legend { padding: 0 6px; color: var(--text); }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.plc-status { white-space: pre-wrap; min-height: 3em; }
 
 @media (max-width: 1100px) {
   #inspect.active, #flow.active { grid-template-columns: 1fr; }

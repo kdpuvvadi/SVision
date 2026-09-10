@@ -167,9 +167,8 @@ def inspect_array(project_id: str, image: np.ndarray, filename: str = "image") -
     camera = _camera_tool(project)
     if camera is None:
         raise ValueError("Add a Camera tool to the flow before inspecting.")
-    source = (camera.get("config") or {}).get("source") or "upload"
-    if source == "gige":
-        raise ValueError("This flow uses a GigE camera. It is not connected yet.")
+    if image is None or getattr(image, "size", 0) == 0:
+        raise ValueError("No image for inspection.")
     active = []
     for tool in (project.get("flow") or {}).get("tools", []):
         try:

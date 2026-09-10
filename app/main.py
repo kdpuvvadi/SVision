@@ -18,23 +18,35 @@
 from __future__ import annotations
 
 import base64
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.config import DATA_DIR, HOST, PORT, ROOT, THREAD_COUNT, app_version, ensure_dirs, lan_addresses
-from app.core.camera import ImageSource
-from app.core.engine import inspect_many
-from app.storage.store import current_images, load_settings, save_settings, store
+from app.core.camera import ImageSource, camera_from_project
+from app.core.handshake import handshake
+from app.core.plc_runtime import plc_runtime
+from app.storage.store import current_images, default_plc_settings, load_settings, save_settings, store
 from app.tools.registry import catalog
 
 ensure_dirs()
 
-app = FastAPI(title="SVision", version="1.0.0")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    plc_runtime.start()
+    try:
+        yield
+    finally:
+        plc_runtime.stop()
+
+
+app = FastAPI(title="SVision", version="1.0.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -59,9 +71,29 @@ class ToolCreate(BaseModel):
     type: str
 
 
+class PlcModbusSettings(BaseModel):
+    enabled: bool = False
+    host: str = "0.0.0.0"
+    port: int = 1502
+    unit_id: int = 1
+
+
+class PlcOpcuaSettings(BaseModel):
+    enabled: bool = False
+    endpoint: str = "opc.tcp://0.0.0.0:4840/svision/"
+
+
+class PlcSettings(BaseModel):
+    production_project_id: str = ""
+    done_pulse_ms: int = 80
+    modbus: PlcModbusSettings = Field(default_factory=PlcModbusSettings)
+    opcua: PlcOpcuaSettings = Field(default_factory=PlcOpcuaSettings)
+
+
 class SettingsUpdate(BaseModel):
-    layout: str = "inspect"
-    flow_open: bool = False
+    layout: str | None = None
+    flow_open: bool | None = None
+    plc: PlcSettings | None = None
 
 
 def _jpeg_url(raw: bytes) -> str:
@@ -77,9 +109,25 @@ def _public_result(item: dict) -> dict:
     return item
 
 
+def _public_batch(result: dict) -> dict:
+    if "results" in result:
+        result = dict(result)
+        result["results"] = [_public_result(dict(item)) for item in result.get("results") or []]
+        return result
+    return _public_result(result)
+
+
 @app.get("/api/health")
 def health() -> dict:
     ips = lan_addresses()
+    cam = ImageSource().status().__dict__
+    try:
+        settings = load_settings()
+        pid = (settings.get("plc") or {}).get("production_project_id") or ""
+        if pid:
+            cam = camera_from_project(store.get_project(pid)).status().__dict__
+    except Exception:
+        pass
     return {
         "status": "ok",
         "version": app_version(),
@@ -88,7 +136,8 @@ def health() -> dict:
         "urls": [f"http://127.0.0.1:{PORT}"] + [f"http://{ip}:{PORT}" for ip in ips],
         "threads": THREAD_COUNT,
         "data_dir": str(DATA_DIR),
-        "camera": ImageSource().status().__dict__,
+        "camera": cam,
+        "plc": plc_runtime.status(),
     }
 
 
@@ -99,7 +148,33 @@ def get_settings() -> dict:
 
 @app.put("/api/settings")
 def put_settings(body: SettingsUpdate) -> dict:
-    return save_settings(body.layout, body.flow_open)
+    plc = body.plc.model_dump() if body.plc is not None else None
+    settings = save_settings(body.layout, body.flow_open, plc)
+    if plc is not None:
+        plc_runtime.apply_settings(settings.get("plc") or default_plc_settings())
+    return settings
+
+
+@app.get("/api/plc/status")
+def plc_status() -> dict:
+    return plc_runtime.status()
+
+
+@app.post("/api/plc/trigger")
+def plc_trigger(project_id: str | None = None) -> dict:
+    pid = (project_id or handshake.production_project_id() or "").strip()
+    if not pid:
+        raise HTTPException(400, "No production scene selected.")
+    job = handshake.request_measure(pid, source="auto")
+    if not job.done_event.wait(timeout=120):
+        raise HTTPException(504, "Measure timed out.")
+    if job.error:
+        raise HTTPException(400, job.error)
+    result = job.result or {}
+    public = _public_batch(result)
+    if "results" in public:
+        current_images.save_result(pid, public)
+    return public
 
 
 @app.get("/api/tools")
@@ -322,22 +397,26 @@ async def inspect(project_id: str, files: list[UploadFile] | None = File(default
         if raw:
             payload.append((item.filename or "image.png", raw))
     try:
+        store.get_project(project_id)
         if payload:
             current_images.save(project_id, payload)
-        else:
-            payload = current_images.read(project_id)
-        if not payload:
-            raise ValueError("Choose or drop images first.")
-        result = inspect_many(project_id, payload)
+        job = handshake.request_measure(project_id, source="auto")
+        if not job.done_event.wait(timeout=120):
+            raise ValueError("Measure timed out.")
+        if job.error:
+            raise ValueError(job.error)
+        result = job.result or {}
+        if "results" not in result:
+            raise ValueError("Measure returned no result.")
+        result = _public_batch(result)
+        current_images.save_result(project_id, result)
+        return result
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(400, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    result["results"] = [_public_result(item) for item in result["results"]]
-    current_images.save_result(project_id, result)
-    return result
 
 
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
@@ -348,12 +427,28 @@ def index() -> FileResponse:
     return FileResponse(STATIC / "index.html")
 
 
+@app.get("/plc-docs")
+def docs_page() -> FileResponse:
+    return FileResponse(STATIC / "docs.html")
+
+
 def main() -> None:
+    import logging
     import sys
     import threading
     import webbrowser
 
     import uvicorn
+
+    class _QuietPlcStatus(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            try:
+                msg = record.getMessage()
+            except Exception:
+                return True
+            return "/api/plc/status" not in msg
+
+    logging.getLogger("uvicorn.access").addFilter(_QuietPlcStatus())
 
     ips = lan_addresses()
     version = app_version()

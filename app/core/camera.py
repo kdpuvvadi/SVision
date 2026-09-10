@@ -19,6 +19,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import cv2
+import numpy as np
+
 
 @dataclass
 class CameraStatus:
@@ -28,23 +31,103 @@ class CameraStatus:
 
 
 class ImageSource:
-    """Current source is uploaded files. GigE/GenICam is reserved for later."""
+    """Upload, USB OpenCV device, or GigE via OpenCV when a driver is available."""
 
-    def __init__(self, gige_ip: str = "") -> None:
-        self.gige_ip = gige_ip
+    def __init__(self, source: str = "upload", gige_ip: str = "", usb_index: int = 0) -> None:
+        self.source = (source or "upload").strip().lower()
+        self.gige_ip = (gige_ip or "").strip()
+        self.usb_index = int(usb_index or 0)
+        self._cap: cv2.VideoCapture | None = None
 
     def status(self) -> CameraStatus:
-        if self.gige_ip:
+        if self.source == "upload":
             return CameraStatus(
                 mode="upload",
                 connected=False,
-                message=f"GigE camera {self.gige_ip} is saved but not connected. Inspection uses uploaded images.",
+                message="Upload images to inspect, or switch Camera to USB / GigE for live grab.",
             )
-        return CameraStatus(
-            mode="upload",
-            connected=False,
-            message="No camera connected. Upload images to inspect. GenICam/GigE can be added later.",
-        )
+        if self.source == "usb":
+            ok = self._open_usb()
+            return CameraStatus(
+                mode="usb",
+                connected=ok,
+                message=f"USB camera index {self.usb_index} ready." if ok else f"USB camera index {self.usb_index} is not available.",
+            )
+        if self.source == "gige":
+            ok = self._open_gige()
+            ip = self.gige_ip or "no IP"
+            return CameraStatus(
+                mode="gige",
+                connected=ok,
+                message=f"GigE camera {ip} ready." if ok else f"GigE camera {ip} is not connected.",
+            )
+        return CameraStatus(mode=self.source, connected=False, message=f"Unknown camera source {self.source}.")
 
-    def grab(self):
-        raise RuntimeError("Camera grab is not available. Upload an image to inspect.")
+    def _open_usb(self) -> bool:
+        if self._cap is not None and self._cap.isOpened():
+            return True
+        self.close()
+        cap = cv2.VideoCapture(self.usb_index)
+        if not cap.isOpened():
+            cap.release()
+            return False
+        self._cap = cap
+        return True
+
+    def _open_gige(self) -> bool:
+        if self._cap is not None and self._cap.isOpened():
+            return True
+        self.close()
+        if not self.gige_ip:
+            return False
+        candidates = [
+            self.gige_ip,
+            f"http://{self.gige_ip}/",
+            f"rtsp://{self.gige_ip}/",
+        ]
+        for target in candidates:
+            cap = cv2.VideoCapture(target)
+            if cap.isOpened():
+                ok, _ = cap.read()
+                if ok:
+                    self._cap = cap
+                    return True
+            cap.release()
+        return False
+
+    def grab(self) -> np.ndarray:
+        if self.source == "upload":
+            raise RuntimeError("Camera is set to Upload. Choose or drop an image, or switch to USB / GigE.")
+        if self.source == "usb":
+            if not self._open_usb():
+                raise RuntimeError(f"USB camera index {self.usb_index} is not available.")
+        elif self.source == "gige":
+            if not self._open_gige():
+                raise RuntimeError(f"GigE camera {self.gige_ip or 'no IP'} is not connected.")
+        else:
+            raise RuntimeError(f"Unknown camera source {self.source}.")
+        assert self._cap is not None
+        ok, frame = self._cap.read()
+        if not ok or frame is None or frame.size == 0:
+            raise RuntimeError("Camera grab failed. No frame.")
+        return frame
+
+    def close(self) -> None:
+        if self._cap is not None:
+            self._cap.release()
+            self._cap = None
+
+
+def camera_from_project(project: dict) -> ImageSource:
+    camera_tool = None
+    for tool in (project.get("flow") or {}).get("tools", []):
+        if tool.get("type") == "camera":
+            camera_tool = tool
+            break
+    cfg = (camera_tool or {}).get("config") or {}
+    source = cfg.get("source") or "upload"
+    try:
+        usb_index = int(cfg.get("usb_index") or 0)
+    except (TypeError, ValueError):
+        usb_index = 0
+    return ImageSource(source=source, gige_ip=cfg.get("gige_ip") or "", usb_index=usb_index)

@@ -71,8 +71,25 @@ def _settings_path() -> Path:
     return DATA_DIR / "settings.json"
 
 
+def default_plc_settings() -> dict:
+    return {
+        "production_project_id": "",
+        "done_pulse_ms": 80,
+        "modbus": {
+            "enabled": False,
+            "host": "0.0.0.0",
+            "port": 1502,
+            "unit_id": 1,
+        },
+        "opcua": {
+            "enabled": False,
+            "endpoint": "opc.tcp://0.0.0.0:4840/svision/",
+        },
+    }
+
+
 def default_settings() -> dict:
-    return {"layout": "inspect", "flow_open": False}
+    return {"layout": "inspect", "flow_open": False, "plc": default_plc_settings()}
 
 
 def load_settings() -> dict:
@@ -87,16 +104,67 @@ def load_settings() -> dict:
         if layout in ("inspect", "edit"):
             settings["layout"] = layout
         settings["flow_open"] = bool(raw.get("flow_open")) and settings["layout"] == "edit"
+        plc = raw.get("plc") if isinstance(raw.get("plc"), dict) else {}
+        merged = default_plc_settings()
+        merged["production_project_id"] = str(plc.get("production_project_id") or "")
+        try:
+            merged["done_pulse_ms"] = max(10, int(plc.get("done_pulse_ms") or 80))
+        except (TypeError, ValueError):
+            merged["done_pulse_ms"] = 80
+        modbus = plc.get("modbus") if isinstance(plc.get("modbus"), dict) else {}
+        opcua = plc.get("opcua") if isinstance(plc.get("opcua"), dict) else {}
+        merged["modbus"].update({k: modbus[k] for k in merged["modbus"] if k in modbus})
+        merged["opcua"].update({k: opcua[k] for k in merged["opcua"] if k in opcua})
+        merged["modbus"]["enabled"] = bool(merged["modbus"].get("enabled"))
+        merged["opcua"]["enabled"] = bool(merged["opcua"].get("enabled"))
+        try:
+            merged["modbus"]["port"] = int(merged["modbus"].get("port") or 1502)
+        except (TypeError, ValueError):
+            merged["modbus"]["port"] = 1502
+        try:
+            merged["modbus"]["unit_id"] = int(merged["modbus"].get("unit_id") or 1)
+        except (TypeError, ValueError):
+            merged["modbus"]["unit_id"] = 1
+        settings["plc"] = merged
     return settings
 
 
-def save_settings(layout: str, flow_open: bool = False) -> dict:
-    settings = {
-        "layout": "edit" if layout == "edit" else "inspect",
-        "flow_open": bool(flow_open) and layout == "edit",
-    }
-    _write_json(_settings_path(), settings)
-    return settings
+def save_settings(
+    layout: str | None = None,
+    flow_open: bool | None = None,
+    plc: dict | None = None,
+) -> dict:
+    current = load_settings()
+    if layout is not None:
+        current["layout"] = "edit" if layout == "edit" else "inspect"
+    if flow_open is not None:
+        current["flow_open"] = bool(flow_open) and current["layout"] == "edit"
+    if plc is not None:
+        merged = default_plc_settings()
+        merged["production_project_id"] = str(plc.get("production_project_id") or "")
+        try:
+            merged["done_pulse_ms"] = max(10, int(plc.get("done_pulse_ms") or 80))
+        except (TypeError, ValueError):
+            merged["done_pulse_ms"] = 80
+        modbus = plc.get("modbus") if isinstance(plc.get("modbus"), dict) else {}
+        opcua = plc.get("opcua") if isinstance(plc.get("opcua"), dict) else {}
+        merged["modbus"].update({k: modbus[k] for k in ("enabled", "host", "port", "unit_id") if k in modbus})
+        merged["opcua"].update({k: opcua[k] for k in ("enabled", "endpoint") if k in opcua})
+        merged["modbus"]["enabled"] = bool(merged["modbus"].get("enabled"))
+        merged["opcua"]["enabled"] = bool(merged["opcua"].get("enabled"))
+        try:
+            merged["modbus"]["port"] = int(merged["modbus"].get("port") or 1502)
+        except (TypeError, ValueError):
+            merged["modbus"]["port"] = 1502
+        try:
+            merged["modbus"]["unit_id"] = int(merged["modbus"].get("unit_id") or 1)
+        except (TypeError, ValueError):
+            merged["modbus"]["unit_id"] = 1
+        merged["modbus"]["host"] = str(merged["modbus"].get("host") or "0.0.0.0")
+        merged["opcua"]["endpoint"] = str(merged["opcua"].get("endpoint") or "opc.tcp://0.0.0.0:4840/svision/")
+        current["plc"] = merged
+    _write_json(_settings_path(), current)
+    return current
 
 
 def _empty_state() -> dict:

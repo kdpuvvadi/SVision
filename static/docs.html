@@ -1,0 +1,211 @@
+<!--
+SVision inspection software
+Copyright (C) 2026 KD Puvvadi
+
+This program is free software; you can redistribute it and/or
+modify it under the terms of the GNU General Public License
+as published by the Free Software Foundation; either version 2
+of the License, or (at your option) any later version.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SVision · PLC documentation</title>
+  <link rel="stylesheet" href="/static/styles.css?v=22" />
+  <style>
+    body.docs-page { overflow: auto; }
+    .docs {
+      max-width: 880px;
+      margin: 0 auto;
+      padding: 24px 20px 64px;
+    }
+    .docs h1 { margin: 0 0 8px; font-size: 28px; }
+    .docs h2 { margin: 28px 0 10px; font-size: 18px; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+    .docs h3 { margin: 18px 0 8px; font-size: 15px; }
+    .docs p, .docs li { color: var(--muted); line-height: 1.55; }
+    .docs code {
+      font-family: ui-monospace, Consolas, monospace;
+      background: #0a0c0e;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: 1px 6px;
+      color: var(--text);
+      font-size: 12px;
+    }
+    .docs pre {
+      background: #0a0c0e;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px 14px;
+      overflow: auto;
+      color: #d5dde6;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .docs table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 10px 0 16px;
+      font-size: 13px;
+    }
+    .docs th, .docs td {
+      border: 1px solid var(--line);
+      padding: 8px 10px;
+      text-align: left;
+      vertical-align: top;
+    }
+    .docs th { background: var(--panel-2); color: var(--text); }
+    .docs td { color: var(--muted); }
+    .docs .top {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+    .docs .nav { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 20px; }
+    .docs .nav a {
+      color: var(--ok);
+      text-decoration: none;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 6px 10px;
+      background: var(--panel-2);
+    }
+  </style>
+</head>
+<body class="docs-page">
+  <div class="docs">
+    <div class="top">
+      <div>
+        <h1>PLC handshake documentation</h1>
+        <p>Modbus TCP and OPC UA share one handshake. Measure runs on a worker thread, not on the web request path.</p>
+      </div>
+      <a class="file-btn" href="/">Back to SVision</a>
+    </div>
+
+    <div class="nav">
+      <a href="#setup">Setup</a>
+      <a href="#signals">Signals</a>
+      <a href="#modbus">Modbus TCP</a>
+      <a href="#opcua">OPC UA</a>
+      <a href="#sequence">Sequence</a>
+      <a href="#modscan">Open ModScan</a>
+    </div>
+
+    <h2 id="setup">Setup in SVision</h2>
+    <ol>
+      <li>Open a scene, add tools, and choose/store an image (or use USB/GigE later).</li>
+      <li>Click <strong>PLC</strong> in the top bar.</li>
+      <li>Set <strong>Production scene</strong> to the scene that should run on trigger.</li>
+      <li>Enable <strong>Modbus TCP</strong> and/or <strong>OPC UA</strong>, set bind host/port/endpoint, then <strong>Save</strong>.</li>
+      <li>Until a live camera is connected, a trigger measures the <strong>currently stored image</strong> for that production scene.</li>
+    </ol>
+
+    <h2 id="signals">Shared signal contract</h2>
+    <p>Both protocols expose the same bits. The PLC owns reject timing from <code>DONE</code>.</p>
+    <table>
+      <thead>
+        <tr><th>Direction</th><th>Name</th><th>Rule</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>In</td><td><code>TRIGGER</code></td><td>Rising edge starts one measure. Ignored while <code>BUSY</code>. Cleared after the edge so writing 1 again retriggers.</td></tr>
+        <tr><td>Out</td><td><code>READY</code></td><td>Production scene ready (stored image or live camera).</td></tr>
+        <tr><td>Out</td><td><code>BUSY</code></td><td>Measure running.</td></tr>
+        <tr><td>Out</td><td><code>DONE</code></td><td>Short pulse with the result bits (see Result pulse ms in PLC settings).</td></tr>
+        <tr><td>Out</td><td><code>OK</code> / <code>NG</code></td><td>Mutually exclusive. Pulsed with <code>DONE</code>, then cleared (not latched).</td></tr>
+        <tr><td>Out</td><td><code>ERROR</code></td><td>Fault pulse (no production scene, no image, camera failure, exception).</td></tr>
+      </tbody>
+    </table>
+    <p>Judgment codes (holding / OPC node): <code>0</code> idle, <code>1</code> OK, <code>2</code> NG, <code>3</code> ERROR. Holding values stay until the next measure; coil outputs pulse then clear.</p>
+
+    <h2 id="modbus">Modbus TCP</h2>
+    <h3>Connection</h3>
+    <ul>
+      <li>SVision is the <strong>Modbus TCP server</strong>. The PLC (or Open ModScan) is the client.</li>
+      <li>Default bind: <code>0.0.0.0:1502</code> (Port `1502`).</li>
+      <li>Default unit / slave id: <code>1</code>.</li>
+    </ul>
+
+    <h3>Coil map (0-based PDU)</h3>
+    <table>
+      <thead>
+        <tr><th>Coil</th><th>Open ModScan 1-based</th><th>Access</th><th>Name</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>0</td><td>000001</td><td>W</td><td>TRIGGER</td></tr>
+        <tr><td>1</td><td>000002</td><td>R</td><td>READY</td></tr>
+        <tr><td>2</td><td>000003</td><td>R</td><td>BUSY</td></tr>
+        <tr><td>3</td><td>000004</td><td>R</td><td>DONE</td></tr>
+        <tr><td>4</td><td>000005</td><td>R</td><td>OK</td></tr>
+        <tr><td>5</td><td>000006</td><td>R</td><td>NG</td></tr>
+        <tr><td>6</td><td>000007</td><td>R</td><td>ERROR</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Holding registers</h3>
+    <table>
+      <thead>
+        <tr><th>Register</th><th>1-based</th><th>Access</th><th>Name</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>0</td><td>40001</td><td>R</td><td>elapsed_ms</td></tr>
+        <tr><td>1</td><td>40002</td><td>R</td><td>judgment (0/1/2/3)</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="opcua">OPC UA</h2>
+    <h3>Connection</h3>
+    <ul>
+      <li>SVision is the <strong>OPC UA server</strong>.</li>
+      <li>Default endpoint: <code>opc.tcp://0.0.0.0:4840/svision/</code></li>
+      <li>From another PC use the IPC LAN IP, for example <code>opc.tcp://192.168.1.10:4840/svision/</code>.</li>
+    </ul>
+
+    <h3>Nodes</h3>
+    <p>Under objects path <code>SVision / Handshake</code>:</p>
+    <table>
+      <thead>
+        <tr><th>Node</th><th>Access</th><th>Type</th><th>Meaning</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>Trigger</code></td><td>W</td><td>Boolean</td><td>Write <code>true</code> to start one measure (server clears it).</td></tr>
+        <tr><td><code>Ready</code></td><td>R</td><td>Boolean</td><td>Ready for trigger.</td></tr>
+        <tr><td><code>Busy</code></td><td>R</td><td>Boolean</td><td>Measure running.</td></tr>
+        <tr><td><code>Done</code></td><td>R</td><td>Boolean</td><td>Result pulse.</td></tr>
+        <tr><td><code>Ok</code></td><td>R</td><td>Boolean</td><td>Last judgment OK.</td></tr>
+        <tr><td><code>Ng</code></td><td>R</td><td>Boolean</td><td>Last judgment NG.</td></tr>
+        <tr><td><code>Error</code></td><td>R</td><td>Boolean</td><td>Fault.</td></tr>
+        <tr><td><code>ElapsedMs</code></td><td>R</td><td>Int</td><td>Last cycle time.</td></tr>
+        <tr><td><code>Judgment</code></td><td>R</td><td>Int</td><td>0 idle, 1 OK, 2 NG, 3 ERROR.</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="sequence">Typical PLC sequence</h2>
+    <pre>1. Wait READY = 1
+2. Pulse TRIGGER = 1 (rising edge)
+3. Wait BUSY = 1, then BUSY = 0 (or wait DONE pulse)
+4. Capture OK / NG / ERROR during the result pulse
+   (or read Judgment holding / OPC node — stays until next cycle)
+5. Reject delay and conveyor timing stay in the PLC</pre>
+
+    <h2 id="modscan">Open ModScan test</h2>
+    <ul>
+      <li>Connection: TCP to IPC IP, port <code>1502</code>, device id <code>1</code>.</li>
+      <li>Point type: <code>01 Coil Status</code>.</li>
+      <li>Address base: <strong>1-based</strong>, start <code>1</code>, length <code>7</code> (or up to 50).</li>
+      <li>Write coil <code>000001</code> = 1 to trigger. Watch <code>000003</code> BUSY, then a short pulse on <code>000004</code> DONE and <code>000005</code>/<code>000006</code> OK/NG.</li>
+      <li>Holding registers: point type holding, start <code>1</code> (or 40001 depending on tool), length <code>2</code>.</li>
+    </ul>
+
+    <h2>Notes</h2>
+    <ul>
+      <li>Web <strong>Measure</strong> is for debug; production should use Modbus/OPC TRIGGER.</li>
+      <li>Only one measure runs at a time. Triggers while BUSY are ignored.</li>
+      <li>Firewall: allow TCP <code>1502</code> (Modbus) and <code>4840</code> (OPC UA) if connecting from another PC.</li>
+    </ul>
+  </div>
+</body>
+</html>
