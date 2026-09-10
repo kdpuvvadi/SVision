@@ -27,18 +27,75 @@ from app.config import FEATURE_SIZE
 _local = threading.local()
 
 
-def _hog() -> cv2.HOGDescriptor:
+def _opencv_hog() -> object | None:
     hog = getattr(_local, "hog", None)
-    if hog is None:
-        hog = cv2.HOGDescriptor(
-            (FEATURE_SIZE, FEATURE_SIZE),
-            (16, 16),
-            (16, 16),
-            (8, 8),
-            9,
-        )
-        _local.hog = hog
+    if hog is not None:
+        return hog
+    ctor = getattr(cv2, "HOGDescriptor", None)
+    if ctor is None:
+        _local.hog = False
+        return None
+    hog = ctor(
+        (FEATURE_SIZE, FEATURE_SIZE),
+        (16, 16),
+        (16, 16),
+        (8, 8),
+        9,
+    )
+    _local.hog = hog
     return hog
+
+
+def _numpy_hog(gray: np.ndarray) -> np.ndarray:
+    """HOG matching OpenCV params used by ML Judgment (win=64, block=16, stride=16, cell=8, bins=9)."""
+    win = FEATURE_SIZE
+    block = 16
+    stride = 16
+    cell = 8
+    nbins = 9
+    img = gray.astype(np.float32)
+    gx = cv2.Sobel(img, cv2.CV_32F, 1, 0, ksize=1)
+    gy = cv2.Sobel(img, cv2.CV_32F, 0, 1, ksize=1)
+    mag, ang = cv2.cartToPolar(gx, gy, angleInDegrees=True)
+    ang = ang % 180.0
+    cells = win // cell
+    hist = np.zeros((cells, cells, nbins), np.float32)
+    bin_w = 180.0 / nbins
+    for cy in range(cells):
+        for cx in range(cells):
+            m = mag[cy * cell : (cy + 1) * cell, cx * cell : (cx + 1) * cell].reshape(-1)
+            a = ang[cy * cell : (cy + 1) * cell, cx * cell : (cx + 1) * cell].reshape(-1)
+            for mi, ai in zip(m, a):
+                b = min(nbins - 1, int(ai / bin_w))
+                hist[cy, cx, b] += mi
+    blocks_y = ((win - block) // stride) + 1
+    blocks_x = ((win - block) // stride) + 1
+    cells_per_block = block // cell
+    out = np.empty((blocks_y * blocks_x * cells_per_block * cells_per_block * nbins,), np.float32)
+    idx = 0
+    eps = 1e-6
+    for by in range(blocks_y):
+        for bx in range(blocks_x):
+            y0 = by * (stride // cell)
+            x0 = bx * (stride // cell)
+            block_vec = hist[y0 : y0 + cells_per_block, x0 : x0 + cells_per_block].reshape(-1)
+            block_vec = block_vec / (np.linalg.norm(block_vec) + eps)
+            block_vec = np.minimum(block_vec, 0.2)
+            block_vec = block_vec / (np.linalg.norm(block_vec) + eps)
+            out[idx : idx + block_vec.size] = block_vec
+            idx += block_vec.size
+    return out
+
+
+def _hog_vector(gray: np.ndarray) -> np.ndarray:
+    hog = _opencv_hog()
+    if hog is False or hog is None:
+        return _numpy_hog(gray)
+    try:
+        raw = hog.compute(gray)
+        return np.asarray(raw, dtype=np.float32).reshape(-1)
+    except Exception:
+        return _numpy_hog(gray)
 
 
 def apply_roi(image: np.ndarray, roi: dict | None) -> np.ndarray:
@@ -91,8 +148,7 @@ def prepare_gray(image: np.ndarray, roi: dict | None = None) -> np.ndarray:
 
 def extract_features(image: np.ndarray, roi: dict | None = None) -> np.ndarray:
     gray = np.ascontiguousarray(prepare_gray(image, roi))
-    hog = _hog().compute(gray)
-    hog_vec = np.asarray(hog, dtype=np.float32).reshape(-1)
+    hog_vec = _hog_vector(gray)
 
     small = cv2.resize(gray, (8, 8), interpolation=cv2.INTER_AREA).astype(np.float32).reshape(-1)
     small = small / 255.0

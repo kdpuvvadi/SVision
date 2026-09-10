@@ -794,6 +794,27 @@ function bind() {
       await saveFlow();
       return;
     }
+    if (e.target.id === "registerModel") {
+      await registerShapeModel();
+      return;
+    }
+    if (e.target.id === "deleteModel") {
+      const tool = selectedTool();
+      await api(`/api/projects/${state.project.id}/tools/${tool.id}/shape-model`, { method: "DELETE" });
+      await refreshSelectedTool();
+      return;
+    }
+    if (e.target.id === "trainBtn") {
+      await train();
+      return;
+    }
+    const id = e.target.dataset.del;
+    if (id) {
+      const tool = selectedTool();
+      await api(`/api/projects/${state.project.id}/tools/${tool.id}/samples/${id}`, { method: "DELETE" });
+      await refreshSelectedTool();
+      return;
+    }
     const tab = e.target.dataset.stab;
     if (!tab) return;
     readOptionsIntoTool();
@@ -806,7 +827,29 @@ function bind() {
     }
     readOptionsIntoTool();
   });
-  $("sceneSettings").addEventListener("change", () => readOptionsIntoTool());
+  $("sceneSettings").addEventListener("change", async (e) => {
+    if (e.target.id === "okFiles") {
+      await uploadSamples("OK", e.target.files);
+      e.target.value = "";
+      return;
+    }
+    if (e.target.id === "ngFiles") {
+      await uploadSamples("NG", e.target.files);
+      e.target.value = "";
+      return;
+    }
+    if (e.target.id === "modelFile") {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      state.modelFile = file;
+      state.modelRoi = null;
+      if (state.modelUrl) URL.revokeObjectURL(state.modelUrl);
+      state.modelUrl = URL.createObjectURL(file);
+      drawModelCanvas();
+      return;
+    }
+    readOptionsIntoTool();
+  });
 
   $("catalog").addEventListener("click", async (e) => {
     const type = e.target.dataset.add;
@@ -858,7 +901,7 @@ function bind() {
     if (e.target.id === "deleteModel") {
       const tool = selectedTool();
       await api(`/api/projects/${state.project.id}/tools/${tool.id}/shape-model`, { method: "DELETE" });
-      await openProject(state.project.id);
+      await refreshSelectedTool();
       return;
     }
     if (e.target.id === "trainBtn") {
@@ -869,11 +912,19 @@ function bind() {
     if (!id) return;
     const tool = selectedTool();
     await api(`/api/projects/${state.project.id}/tools/${tool.id}/samples/${id}`, { method: "DELETE" });
-    await openProject(state.project.id);
+    await refreshSelectedTool();
   });
   $("toolPanel").addEventListener("change", async (e) => {
-    if (e.target.id === "okFiles") await uploadSamples("OK", e.target.files);
-    if (e.target.id === "ngFiles") await uploadSamples("NG", e.target.files);
+    if (e.target.id === "okFiles") {
+      await uploadSamples("OK", e.target.files);
+      e.target.value = "";
+      return;
+    }
+    if (e.target.id === "ngFiles") {
+      await uploadSamples("NG", e.target.files);
+      e.target.value = "";
+      return;
+    }
     if (e.target.id === "modelFile") {
       const file = e.target.files?.[0];
       if (!file) return;
@@ -987,22 +1038,39 @@ async function uploadSamples(label, fileList) {
   body.append("label", label);
   files.forEach((f) => body.append("files", f));
   await api(`/api/projects/${state.project.id}/tools/${tool.id}/samples`, { method: "POST", body });
-  await openProject(state.project.id);
+  await refreshSelectedTool();
 }
 
 async function train() {
   const tool = selectedTool();
+  if (!tool) return;
   const btn = $("trainBtn");
   if (btn) btn.disabled = true;
   if ($("modelStatus")) $("modelStatus").textContent = "Training…";
   try {
     await saveFlow();
     await api(`/api/projects/${state.project.id}/tools/${tool.id}/train`, { method: "POST" });
-    await openProject(state.project.id);
+    await refreshSelectedTool();
   } catch (err) {
     if ($("modelStatus")) $("modelStatus").textContent = err.message;
+    else alert(err.message);
   } finally {
     if ($("trainBtn")) $("trainBtn").disabled = false;
+  }
+}
+
+async function refreshSelectedTool() {
+  const tab = state.settingTab;
+  const selected = state.selectedId;
+  const flowOpen = state.flowOpen;
+  await openProject(state.project.id);
+  state.settingTab = tab;
+  state.selectedId = selected;
+  state.flowOpen = flowOpen;
+  if (state.layout === "edit") {
+    showLayout("edit", { keepFlow: true, keepSelection: true });
+  } else {
+    renderOptions();
   }
 }
 
@@ -1346,7 +1414,7 @@ async function registerShapeModel() {
   body.append("h", state.modelRoi.h);
   await api(`/api/projects/${state.project.id}/tools/${tool.id}/shape-model`, { method: "POST", body });
   state.settingTab = "panel:shape_model";
-  await openProject(state.project.id);
+  await refreshSelectedTool();
 }
 
 function drawModelCanvas() {
