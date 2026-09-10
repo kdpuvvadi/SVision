@@ -25,6 +25,7 @@ from app.tools.classify import ClassifyTool
 from app.tools.code import CodeTool
 from app.tools.ocr import OcrTool
 from app.tools.position_compensation import PositionCompensationTool
+from app.tools.robotic import RoboticTool
 from app.tools.shape_search import ShapeSearchTool
 
 _TOOLS: dict[str, Tool] = {}
@@ -77,3 +78,4 @@ register(PositionCompensationTool())
 register(ClassifyTool())
 register(OcrTool())
 register(CodeTool())
+register(RoboticTool())

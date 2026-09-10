@@ -196,7 +196,12 @@ function settingTabs(spec) {
   const tabs = [{ key: "name", label: "Name" }];
   for (const field of spec.fields || []) tabs.push({ key: field.key, label: field.label, field });
   for (const name of spec.panels || []) {
-    const labels = { samples: "Samples", shape_model: "Model" };
+    const labels = {
+      samples: "Samples",
+      shape_model: "Model",
+      robot_register: "Register",
+      robot_calib: "Calibrate",
+    };
     tabs.push({ key: `panel:${name}`, label: labels[name] || name, panel: name });
   }
   tabs.push({ key: "help", label: "Help" });
@@ -241,7 +246,7 @@ function renderOptionsInto(panel) {
   if (!tabs.some((tab) => tab.key === state.settingTab)) state.settingTab = tabs[0].key;
   const active = tabs.find((tab) => tab.key === state.settingTab);
   const body = active.key === "help"
-    ? helpHtml(spec)
+    ? helpHtml(spec, tool)
     : active.field
       ? fieldHtml(tool, active.field)
       : active.panel
@@ -260,6 +265,8 @@ function renderOptionsInto(panel) {
     </div>`;
   if (active.field?.kind === "roi") drawRoiCanvas();
   if (active.panel === "shape_model") drawModelCanvas();
+  if (active.panel === "robot_register") initRobotRegisterPanel(tool);
+  if (active.panel === "robot_calib") initRobotCalibPanel(tool);
   drawToolOutputRegion(tool);
 }
 
@@ -285,9 +292,22 @@ function measuredTool(id) {
   return item?.tools?.find((tool) => tool.id === id) || null;
 }
 
-function helpHtml(spec) {
+function helpHtml(spec, tool) {
   const parts = [`<p>${escapeHtml(spec.summary || "No help for this tool.")}</p>`];
   if (spec.status) parts.push(`<p class="hint">${escapeHtml(spec.status)}</p>`);
+  if (tool?.type === "robotic" && state.project?.id && tool.id) {
+    const host = location.host || "127.0.0.1:8080";
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    const wsUrl = `${proto}://${host}/ws/robot/${state.project.id}/${tool.id}`;
+    const mode = tool.config?.stream_mode || "on_trigger";
+    parts.push(`
+      <div class="robot-help-ids">
+        <p><b>Scene id</b><br /><code>${escapeHtml(state.project.id)}</code></p>
+        <p><b>Tool id</b><br /><code>${escapeHtml(tool.id)}</code></p>
+        <p><b>WebSocket</b> (${escapeHtml(mode)})<br /><code class="robot-ws-url">${escapeHtml(wsUrl)}</code></p>
+        <p class="hint">Connect a robot client to this URL. Payload JSON includes count and objects with x,y,a and rx,ry,ra when calibrated.</p>
+      </div>`);
+  }
   return `<div class="tool-help">${parts.join("")}</div>`;
 }
 
@@ -322,6 +342,8 @@ function fieldHtml(tool, field) {
 
 function panelHtml(tool, name) {
   if (name === "shape_model") return shapeModelPanel(tool);
+  if (name === "robot_register") return robotRegisterPanel(tool);
+  if (name === "robot_calib") return robotCalibPanel(tool);
   if (name !== "samples") return "";
   const samples = tool.state?.samples || [];
   const ok = samples.filter((s) => s.label === "OK");
@@ -808,6 +830,112 @@ function bind() {
       await train();
       return;
     }
+    if (e.target.id === "robotAddClass") {
+      const name = prompt("Class name", "Part");
+      if (!name) return;
+      const tool = selectedTool();
+      await api(`/api/projects/${state.project.id}/tools/${tool.id}/robot/classes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      state.settingTab = "panel:robot_register";
+      await refreshSelectedTool();
+      return;
+    }
+    if (e.target.id === "robotMarkSingle") {
+      const tool = selectedTool();
+      const cid = await robotEnsureSingleClass(tool);
+      await robotMark(cid);
+      return;
+    }
+    if (e.target.dataset.robotMark) {
+      await robotMark(e.target.dataset.robotMark);
+      return;
+    }
+    if (e.target.dataset.robotDelClass) {
+      const tool = selectedTool();
+      await api(`/api/projects/${state.project.id}/tools/${tool.id}/robot/classes/${e.target.dataset.robotDelClass}`, { method: "DELETE" });
+      state.settingTab = "panel:robot_register";
+      await refreshSelectedTool();
+      return;
+    }
+    if (e.target.dataset.robotClass) {
+      state.robotClassId = e.target.dataset.robotClass;
+      renderSceneSettings();
+      return;
+    }
+    if (e.target.closest("[data-robot-img]")) {
+      const btn = e.target.closest("[data-robot-img]");
+      state.robotImageIndex = Number(btn.dataset.robotImg);
+      await drawRobotRegCanvas();
+      return;
+    }
+    if (e.target.id === "robotDelImage") {
+      const tool = selectedTool();
+      const img = (state.robotImages || [])[state.robotImageIndex || 0];
+      if (!img) return;
+      await api(`/api/projects/${state.project.id}/tools/${tool.id}/robot/register-images/${img.id}`, { method: "DELETE" });
+      state.settingTab = "panel:robot_register";
+      await refreshSelectedTool();
+      return;
+    }
+    if (e.target.id === "robotUseCurrent") {
+      const tool = selectedTool();
+      const saved = await api(`/api/projects/${state.project.id}/current-image`);
+      if (!saved.files?.[0]?.url) {
+        alert("Store a scene image first.");
+        return;
+      }
+      const blob = await fetch(saved.files[0].url).then((r) => r.blob());
+      const body = new FormData();
+      body.append("file", blob, saved.files[0].filename || "current.png");
+      await api(`/api/projects/${state.project.id}/tools/${tool.id}/robot/register-images`, { method: "POST", body });
+      state.settingTab = "panel:robot_register";
+      await refreshSelectedTool();
+      return;
+    }
+    if (e.target.id === "robotCalibCompute") {
+      const tool = selectedTool();
+      const points = state.robotCalibPoints || [];
+      await api(`/api/projects/${state.project.id}/tools/${tool.id}/robot/calib`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ points }),
+      });
+      state.settingTab = "panel:robot_calib";
+      await refreshSelectedTool();
+      return;
+    }
+    if (e.target.id === "robotCalibClear") {
+      const tool = selectedTool();
+      await api(`/api/projects/${state.project.id}/tools/${tool.id}/robot/calib`, { method: "DELETE" });
+      state.robotCalibPoints = null;
+      state.settingTab = "panel:robot_calib";
+      await refreshSelectedTool();
+      return;
+    }
+    if (e.target.dataset.calibPick != null) {
+      state.robotCalibPick = Number(e.target.dataset.calibPick);
+      if ($("robotConvOut")) $("robotConvOut").textContent = `Click image for point ${state.robotCalibPick + 1}`;
+      return;
+    }
+    if (e.target.id === "robotConvert") {
+      const tool = selectedTool();
+      const px = Number($("robotConvPx").value);
+      const py = Number($("robotConvPy").value);
+      try {
+        const out = await api(`/api/projects/${state.project.id}/tools/${tool.id}/robot/convert`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ px, py }),
+        });
+        $("robotConvOut").textContent = `rx=${out.rx.toFixed(2)} ry=${out.ry.toFixed(2)}`;
+      } catch (err) {
+        $("robotConvOut").textContent = err.message;
+      }
+      return;
+    }
     const id = e.target.dataset.del;
     if (id) {
       const tool = selectedTool();
@@ -825,6 +953,19 @@ function bind() {
     if (e.target.id === "minConfidence" && $("confValue")) {
       $("confValue").textContent = Number(e.target.value).toFixed(2);
     }
+    if (e.target.id === "robotBoxAngle") {
+      if (state.robotRegBox) state.robotRegBox.angle = Number(e.target.value) || 0;
+      drawRobotRegCanvas();
+      return;
+    }
+    if (e.target.dataset.calibI != null) {
+      const i = Number(e.target.dataset.calibI);
+      const k = e.target.dataset.calibK;
+      state.robotCalibPoints = state.robotCalibPoints || [];
+      state.robotCalibPoints[i] = state.robotCalibPoints[i] || { px: 0, py: 0, rx: 0, ry: 0 };
+      state.robotCalibPoints[i][k] = Number(e.target.value) || 0;
+      return;
+    }
     readOptionsIntoTool();
   });
   $("sceneSettings").addEventListener("change", async (e) => {
@@ -836,6 +977,19 @@ function bind() {
     if (e.target.id === "ngFiles") {
       await uploadSamples("NG", e.target.files);
       e.target.value = "";
+      return;
+    }
+    if (e.target.id === "robotRegFiles") {
+      const tool = selectedTool();
+      const files = [...(e.target.files || [])];
+      e.target.value = "";
+      for (const f of files) {
+        const body = new FormData();
+        body.append("file", f);
+        await api(`/api/projects/${state.project.id}/tools/${tool.id}/robot/register-images`, { method: "POST", body });
+      }
+      state.settingTab = "panel:robot_register";
+      await refreshSelectedTool();
       return;
     }
     if (e.target.id === "modelFile") {
@@ -937,6 +1091,23 @@ function bind() {
   });
 
   document.addEventListener("mousedown", (e) => {
+    if (e.target.id === "robotRegCanvas") {
+      const p = robotCanvasNorm(e, "robotRegCanvas", "robotRegFit");
+      if (!p) return;
+      state.robotRegDrawing = { x: p.nx, y: p.ny, x2: p.nx, y2: p.ny };
+      return;
+    }
+    if (e.target.id === "robotCalibCanvas") {
+      const p = robotCanvasNorm(e, "robotCalibCanvas", "robotCalibFit");
+      if (!p) return;
+      const i = state.robotCalibPick != null ? state.robotCalibPick : 0;
+      state.robotCalibPoints = state.robotCalibPoints || [];
+      while (state.robotCalibPoints.length < 4) state.robotCalibPoints.push({ px: 0, py: 0, rx: 0, ry: 0 });
+      state.robotCalibPoints[i] = { ...state.robotCalibPoints[i], px: p.px, py: p.py };
+      state.robotCalibPick = (i + 1) % 4;
+      renderSceneSettings();
+      return;
+    }
     if (e.target.id === "modelCanvas") {
       const p = canvasPoint(e, "modelCanvas");
       state.modelDrawing = { x: p.x, y: p.y, x2: p.x, y2: p.y };
@@ -947,6 +1118,26 @@ function bind() {
     state.drawing = { x: p.x, y: p.y, x2: p.x, y2: p.y };
   });
   document.addEventListener("mousemove", (e) => {
+    if (state.robotRegDrawing && $("robotRegCanvas")) {
+      const p = robotCanvasNorm(e, "robotRegCanvas", "robotRegFit");
+      if (p) {
+        state.robotRegDrawing.x2 = p.nx;
+        state.robotRegDrawing.y2 = p.ny;
+        const d = state.robotRegDrawing;
+        state.robotRegBox = {
+          cx: (Math.min(d.x, d.x2) + Math.max(d.x, d.x2)) / 2,
+          cy: (Math.min(d.y, d.y2) + Math.max(d.y, d.y2)) / 2,
+          w: Math.abs(d.x2 - d.x),
+          h: Math.abs(d.y2 - d.y),
+          angle: Number($("robotBoxAngle")?.value || 0),
+        };
+        if ($("robotBoxReadout")) {
+          $("robotBoxReadout").textContent = `cx ${state.robotRegBox.cx.toFixed(2)} cy ${state.robotRegBox.cy.toFixed(2)} w ${state.robotRegBox.w.toFixed(2)} h ${state.robotRegBox.h.toFixed(2)}`;
+        }
+        drawRobotRegCanvas();
+      }
+      return;
+    }
     if (state.modelDrawing && $("modelCanvas")) {
       const p = canvasPoint(e, "modelCanvas");
       state.modelDrawing.x2 = p.x;
@@ -961,6 +1152,11 @@ function bind() {
     drawRoiCanvas();
   });
   window.addEventListener("mouseup", async () => {
+    if (state.robotRegDrawing) {
+      state.robotRegDrawing = null;
+      drawRobotRegCanvas();
+      return;
+    }
     if (state.modelDrawing) {
       const d = state.modelDrawing;
       state.modelDrawing = null;
@@ -1373,6 +1569,12 @@ function toolDetail(tool) {
       ? tool.codes.map((c) => `${c.type}: ${c.value}`).join(", ")
       : (tool.message || "No code");
     if (tool.expected) detail += `  expected: ${tool.expected}`;
+  } else if (tool.type === "robotic") {
+    const objs = tool.objects || [];
+    detail = objs.length
+      ? objs.slice(0, 4).map((o) => `#${o.id} ${o.class_name || ""} (${Number(o.x).toFixed(0)},${Number(o.y).toFixed(0)},a=${Number(o.a).toFixed(1)})`).join(" · ")
+      : (tool.message || "No objects");
+    if (objs.length > 4) detail += ` · +${objs.length - 4}`;
   }
   return `${detail} · ${Number(tool.elapsed_ms || 0).toFixed(1)} ms`;
 }
@@ -1414,6 +1616,239 @@ async function registerShapeModel() {
   body.append("h", state.modelRoi.h);
   await api(`/api/projects/${state.project.id}/tools/${tool.id}/shape-model`, { method: "POST", body });
   state.settingTab = "panel:shape_model";
+  await refreshSelectedTool();
+}
+
+function robotRegisterPanel(tool) {
+  const multi = (tool.config?.class_mode || "single") === "multi";
+  const robot = tool.state?.robot || {};
+  const classes = robot.classes || [];
+  const images = robot.register_images || [];
+  const selectedClass = state.robotClassId || classes[0]?.id || "";
+  const classRows = multi
+    ? classes.map((c) => `
+        <div class="robot-class ${c.id === selectedClass ? "selected" : ""}" data-robot-class="${c.id}">
+          <span class="swatch" style="background:${escapeHtml(c.color || "#1ad4c0")}"></span>
+          <b>${escapeHtml(c.name)}</b>
+          <span class="hint">${c.instance_count || 0} instances</span>
+          <button type="button" data-robot-mark="${c.id}">Mark</button>
+          <button type="button" data-robot-del-class="${c.id}">Del</button>
+        </div>`).join("") || `<p class="hint">Add a class, then Mark.</p>`
+    : `<p class="hint">Single class: <b>${escapeHtml(tool.config?.model_name || "Part")}</b>. Draw a box and Mark.</p>
+       <button type="button" id="robotMarkSingle" class="primary">Mark</button>`;
+  const thumbs = images.map((img, i) =>
+    `<button type="button" class="robot-thumb ${state.robotImageIndex === i ? "active" : ""}" data-robot-img="${i}">
+      <img src="/api/projects/${state.project.id}/tools/${tool.id}/robot/register-images/${img.id}?thumb=1" alt="" />
+    </button>`
+  ).join("");
+  return `
+    <p class="hint">VisionMaster-style register: add images, draw a box (set angle), Mark, then instances are saved for template match.</p>
+    <div class="sample-actions">
+      <label class="file-btn">Add images<input id="robotRegFiles" type="file" accept="image/*" multiple hidden /></label>
+      <button type="button" id="robotUseCurrent">Use current image</button>
+      <button type="button" id="robotDelImage">Delete image</button>
+      ${multi ? `<button type="button" id="robotAddClass">Add class</button>` : ""}
+    </div>
+    <div class="robot-tray">${thumbs || "<p class='hint'>No register images yet.</p>"}</div>
+    <p class="hint" id="robotTrayInfo">Current: ${(images.length ? (state.robotImageIndex || 0) + 1 : 0)} / ${images.length}</p>
+    <div class="roi-row">
+      <span>Box angle</span>
+      <input id="robotBoxAngle" type="number" min="-180" max="180" step="1" value="${Number(state.robotBoxAngle || 0)}" />
+      <span id="robotBoxReadout" class="hint">Draw on the canvas</span>
+    </div>
+    <div class="roi-stage"><canvas id="robotRegCanvas" width="640" height="360"></canvas></div>
+    <div class="robot-classes">${classRows}</div>
+    <p class="hint">Angle enable is controlled on the tool settings tab. Mark stores a rotated crop for each instance.</p>
+  `;
+}
+
+function robotCalibPanel(tool) {
+  const calib = tool.state?.robot?.calib || {};
+  const points = state.robotCalibPoints || calib.points || [
+    { px: 0, py: 0, rx: 0, ry: 0 },
+    { px: 0, py: 0, rx: 0, ry: 0 },
+    { px: 0, py: 0, rx: 0, ry: 0 },
+    { px: 0, py: 0, rx: 0, ry: 0 },
+  ];
+  state.robotCalibPoints = points.map((p) => ({ ...p }));
+  const rows = state.robotCalibPoints.map((p, i) => `
+    <tr>
+      <td>${i + 1}</td>
+      <td><input data-calib-i="${i}" data-calib-k="px" type="number" step="0.1" value="${Number(p.px) || 0}" /></td>
+      <td><input data-calib-i="${i}" data-calib-k="py" type="number" step="0.1" value="${Number(p.py) || 0}" /></td>
+      <td><input data-calib-i="${i}" data-calib-k="rx" type="number" step="0.1" value="${Number(p.rx) || 0}" /></td>
+      <td><input data-calib-i="${i}" data-calib-k="ry" type="number" step="0.1" value="${Number(p.ry) || 0}" /></td>
+      <td><button type="button" data-calib-pick="${i}">Click image</button></td>
+    </tr>`).join("");
+  return `
+    <p class="hint">Enter 4 pixel↔robot pairs (or click image to fill px/py). Compute homography for world coordinates.</p>
+    <p class="model-status ${calib.ready ? "" : "warn"}">${calib.ready ? "Calibration ready." : "Not calibrated."}</p>
+    <div class="roi-stage"><canvas id="robotCalibCanvas" width="640" height="280"></canvas></div>
+    <table class="robot-calib-table">
+      <thead><tr><th>#</th><th>px</th><th>py</th><th>rx</th><th>ry</th><th></th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="sample-actions">
+      <button type="button" id="robotCalibCompute" class="primary">Compute</button>
+      <button type="button" id="robotCalibClear">Clear</button>
+    </div>
+    <div class="roi-row">
+      <span>Convert</span>
+      <input id="robotConvPx" type="number" step="0.1" placeholder="px" />
+      <input id="robotConvPy" type="number" step="0.1" placeholder="py" />
+      <button type="button" id="robotConvert">→ robot</button>
+      <span id="robotConvOut" class="hint"></span>
+    </div>
+  `;
+}
+
+async function initRobotRegisterPanel(tool) {
+  state.robotImages = tool.state?.robot?.register_images || [];
+  if (state.robotImageIndex == null) state.robotImageIndex = 0;
+  if (state.robotImageIndex >= state.robotImages.length) state.robotImageIndex = Math.max(0, state.robotImages.length - 1);
+  await drawRobotRegCanvas();
+}
+
+async function initRobotCalibPanel(tool) {
+  await drawRobotCalibCanvas();
+}
+
+async function drawRobotRegCanvas() {
+  const canvas = $("robotRegCanvas");
+  if (!canvas || !state.project) return;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#0a0c0e";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const images = state.robotImages || [];
+  const idx = state.robotImageIndex || 0;
+  const imgMeta = images[idx];
+  const img = new Image();
+  const paint = () => {
+    ctx.fillStyle = "#0a0c0e";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    if (img.width) {
+      const scale = Math.min(canvas.width / img.width, canvas.height / img.height);
+      const w = img.width * scale;
+      const h = img.height * scale;
+      const x = (canvas.width - w) / 2;
+      const y = (canvas.height - h) / 2;
+      state.robotRegFit = { x, y, w, h, iw: img.width, ih: img.height };
+      ctx.drawImage(img, x, y, w, h);
+    }
+    const box = state.robotRegBox;
+    if (box && state.robotRegFit) {
+      const fit = state.robotRegFit;
+      const cx = fit.x + box.cx * fit.w;
+      const cy = fit.y + box.cy * fit.h;
+      const bw = box.w * fit.w;
+      const bh = box.h * fit.h;
+      const ang = (Number($("robotBoxAngle")?.value || box.angle || 0) * Math.PI) / 180;
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(ang);
+      ctx.strokeStyle = "#1ad4c0";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(-bw / 2, -bh / 2, bw, bh);
+      ctx.strokeStyle = "#ff4d5a";
+      ctx.beginPath();
+      ctx.moveTo(-8, 0); ctx.lineTo(8, 0);
+      ctx.moveTo(0, -8); ctx.lineTo(0, 8);
+      ctx.stroke();
+      ctx.restore();
+    }
+  };
+  if (!imgMeta) {
+    paint();
+    return;
+  }
+  img.onload = paint;
+  img.src = `/api/projects/${state.project.id}/tools/${selectedTool().id}/robot/register-images/${imgMeta.id}`;
+}
+
+async function drawRobotCalibCanvas() {
+  const canvas = $("robotCalibCanvas");
+  if (!canvas || !state.project) return;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#0a0c0e";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const preview = $("preview");
+  const img = new Image();
+  img.onload = () => {
+    const scale = Math.min(canvas.width / img.width, canvas.height / img.height);
+    const w = img.width * scale;
+    const h = img.height * scale;
+    const x = (canvas.width - w) / 2;
+    const y = (canvas.height - h) / 2;
+    state.robotCalibFit = { x, y, w, h, iw: img.width, ih: img.height };
+    ctx.drawImage(img, x, y, w, h);
+    (state.robotCalibPoints || []).forEach((p, i) => {
+      if (!p.px && !p.py) return;
+      const px = x + (p.px / img.width) * w;
+      const py = y + (p.py / img.height) * h;
+      ctx.fillStyle = "#1ad4c0";
+      ctx.beginPath();
+      ctx.arc(px, py, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#fff";
+      ctx.fillText(String(i + 1), px + 8, py - 8);
+    });
+  };
+  if (preview && preview.src && !preview.hidden) img.src = preview.src;
+  else {
+    try {
+      const saved = await api(`/api/projects/${state.project.id}/current-image`);
+      if (saved.files?.[0]?.url) img.src = saved.files[0].url;
+    } catch { /* empty */ }
+  }
+}
+
+function robotCanvasNorm(e, canvasId, fitKey) {
+  const canvas = $(canvasId);
+  const fit = state[fitKey];
+  if (!canvas || !fit) return null;
+  const rect = canvas.getBoundingClientRect();
+  const x = ((e.clientX - rect.left) / rect.width) * canvas.width;
+  const y = ((e.clientY - rect.top) / rect.height) * canvas.height;
+  if (x < fit.x || y < fit.y || x > fit.x + fit.w || y > fit.y + fit.h) return null;
+  return {
+    nx: (x - fit.x) / fit.w,
+    ny: (y - fit.y) / fit.h,
+    px: ((x - fit.x) / fit.w) * fit.iw,
+    py: ((y - fit.y) / fit.h) * fit.ih,
+  };
+}
+
+async function robotEnsureSingleClass(tool) {
+  const name = (tool.config?.model_name || "Part").trim() || "Part";
+  const existing = (tool.state?.robot?.classes || [])[0];
+  if (existing) return existing.id;
+  const created = await api(`/api/projects/${state.project.id}/tools/${tool.id}/robot/classes`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, color: "#1ad4c0" }),
+  });
+  return created.id;
+}
+
+async function robotMark(classId) {
+  const tool = selectedTool();
+  if (!tool || !state.robotRegBox) {
+    alert("Draw a box on the register image first.");
+    return;
+  }
+  const images = state.robotImages || [];
+  const img = images[state.robotImageIndex || 0];
+  const angle = Number($("robotBoxAngle")?.value || 0);
+  const body = new FormData();
+  body.append("class_id", classId);
+  if (img?.id) body.append("image_id", img.id);
+  body.append("cx", state.robotRegBox.cx);
+  body.append("cy", state.robotRegBox.cy);
+  body.append("w", state.robotRegBox.w);
+  body.append("h", state.robotRegBox.h);
+  body.append("angle", angle);
+  await api(`/api/projects/${state.project.id}/tools/${tool.id}/robot/mark`, { method: "POST", body });
+  state.settingTab = "panel:robot_register";
   await refreshSelectedTool();
 }
 
