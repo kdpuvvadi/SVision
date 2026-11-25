@@ -96,6 +96,14 @@ function flowPayload() {
 async function boot() {
   state.health = await api("/api/health");
   state.catalog = await api("/api/tools");
+  const modules = state.catalog.flatMap((tool) => tool.ui_modules || []);
+  if (window.SVisionTools?.ensureModules) {
+    try {
+      await window.SVisionTools.ensureModules(modules);
+    } catch (err) {
+      console.warn(err);
+    }
+  }
   const urls = state.health.urls.filter((u) => !u.includes("127.0.0.1"));
   const where = urls.length ? urls[0] : state.health.urls[0];
   const version = (state.health.version || "").trim();
@@ -198,14 +206,10 @@ function renderEditor() {
 function settingTabs(spec) {
   const tabs = [{ key: "name", label: "Name" }];
   for (const field of spec.fields || []) tabs.push({ key: field.key, label: field.label, field });
+  const labels = spec.panel_labels || {};
   for (const name of spec.panels || []) {
-    const labels = {
-      samples: "Samples",
-      shape_model: "Model",
-      robot_register: "Register",
-      robot_calib: "Calibrate",
-    };
-    tabs.push({ key: `panel:${name}`, label: labels[name] || name, panel: name });
+    const label = labels[name] || window.SVisionTools?.panelLabel?.(name, name) || name;
+    tabs.push({ key: `panel:${name}`, label, panel: name });
   }
   tabs.push({ key: "help", label: "Help" });
   return tabs;
@@ -267,9 +271,10 @@ function renderOptionsInto(panel) {
       <div class="setting-body">${body}</div>
     </div>`;
   if (active.field?.kind === "roi") drawRoiCanvas();
-  if (active.panel === "shape_model") drawModelCanvas();
-  if (active.panel === "robot_register") initRobotRegisterPanel(tool);
-  if (active.panel === "robot_calib") initRobotCalibPanel(tool);
+  if (active.panel) {
+    const plugin = window.SVisionTools?.panel?.(active.panel);
+    if (plugin?.mount) plugin.mount(tool);
+  }
   drawToolOutputRegion(tool);
 }
 
@@ -372,30 +377,11 @@ function helpHtml(spec, tool) {
 }
 
 function fieldHtml(tool, field) {
+  const custom = window.SVisionTools?.fieldKind?.(field.kind);
+  if (custom) return custom(tool, field);
   const value = tool.config?.[field.key];
   if (field.kind === "text") {
     return `<label>${escapeHtml(field.label)}<input data-key="${field.key}" type="text" value="${escapeHtml(value || "")}" placeholder="${escapeHtml(field.placeholder || "")}" /></label>`;
-  }
-  if (field.kind === "cti") {
-    return `<label>${escapeHtml(field.label)}
-      <div class="path-row">
-        <input data-key="${field.key}" type="text" value="${escapeHtml(value || "")}" placeholder="${escapeHtml(field.placeholder || "")}" />
-        <button type="button" data-browse-cti>Find CTI…</button>
-      </div>
-      <span class="hint">GenTL producer (.cti) on this IPC. Required for GigE / GenTL cameras.</span>
-      <div id="ctiPicker" class="cti-picker" hidden></div>
-    </label>`;
-  }
-  if (field.kind === "gentl_device") {
-    const label = value || "";
-    return `<label>${escapeHtml(field.label)}
-      <div class="path-row">
-        <input data-key="${field.key}" type="text" value="${escapeHtml(label)}" placeholder="${escapeHtml(field.placeholder || "")}" />
-        <button type="button" data-scan-devices>Scan</button>
-      </div>
-      <span class="hint">Pick a device id after scanning with the CTI producer above.</span>
-      <div id="devicePicker" class="cti-picker" hidden></div>
-    </label>`;
   }
   if (field.kind === "select") {
     const selected = (opt) => value === opt.value || (field.key === "source" && value === "gige" && opt.value === "gentl");
@@ -423,47 +409,9 @@ function fieldHtml(tool, field) {
 }
 
 function panelHtml(tool, name) {
-  if (name === "shape_model") return shapeModelPanel(tool);
-  if (name === "robot_register") return robotRegisterPanel(tool);
-  if (name === "robot_calib") return robotCalibPanel(tool);
-  if (name !== "samples") return "";
-  const samples = tool.state?.samples || [];
-  const ok = samples.filter((s) => s.label === "OK");
-  const ng = samples.filter((s) => s.label === "NG");
-  const model = tool.state?.model || {};
-  let status = "No model trained. Add OK and NG samples for this tool, then train.";
-  if (model.trained_at) {
-    status = model.stale
-      ? `This tool's model is out of date (${model.trained_at}). Retrain.`
-      : `Trained ${model.trained_at}. ${model.ok_count} OK / ${model.ng_count} NG.`;
-  }
-  return `
-    <div id="modelStatus" class="model-status ${model.stale ? "warn" : ""}">${escapeHtml(status)}</div>
-    <div class="sample-actions">
-      <label class="file-btn ok">Add OK<input id="okFiles" type="file" accept="image/*" multiple hidden /></label>
-      <label class="file-btn ng">Add NG<input id="ngFiles" type="file" accept="image/*" multiple hidden /></label>
-      <button id="trainBtn" type="button" class="primary">Train model</button>
-    </div>
-    <div class="sample-grid">
-      <div><h3>OK <span>${ok.length}</span></h3><div class="thumbs">${ok.map((s) => thumb(tool, s)).join("") || "<p class='hint'>No OK samples.</p>"}</div></div>
-      <div><h3>NG <span>${ng.length}</span></h3><div class="thumbs">${ng.map((s) => thumb(tool, s)).join("") || "<p class='hint'>No NG samples.</p>"}</div></div>
-    </div>`;
-}
-
-function shapeModelPanel(tool) {
-  const model = tool.state?.shape_model || {};
-  const saved = !!model.saved;
-  const src = saved ? `/api/projects/${state.project.id}/tools/${tool.id}/shape-model?t=${encodeURIComponent(model.registered_at || "")}` : "";
-  return `
-    <p class="hint">Choose an image, draw a rectangle around the pattern, then Register. The pattern can be any shape.</p>
-    <div class="sample-actions">
-      <label class="file-btn">Choose image<input id="modelFile" type="file" accept="image/*" hidden /></label>
-      <button id="registerModel" type="button" class="primary">Register</button>
-      <button id="deleteModel" type="button">Delete</button>
-    </div>
-    <div class="roi-stage"><canvas id="modelCanvas" width="640" height="280"></canvas></div>
-    <div class="model-status ${saved ? "" : "warn"}">${saved ? `Registered model ${model.width}×${model.height}` : "Model image is not saved."}</div>
-    ${saved ? `<img class="model-preview" src="${src}" alt="Registered model" />` : ""}`;
+  const plugin = window.SVisionTools?.panel?.(name);
+  if (plugin?.render) return plugin.render(tool);
+  return "";
 }
 
 function thumb(tool, sample) {
@@ -1703,32 +1651,8 @@ function showResult(index) {
 }
 
 function toolDetail(tool) {
-  let detail = tool.message || "";
-  if (tool.type === "camera") {
-    detail = tool.message || tool.source || "";
-  } else if (tool.type === "shape_search") {
-    detail = tool.message || "No shape";
-    if (tool.x != null) detail += `  x ${tool.x}  y ${tool.y}  angle ${tool.angle}°`;
-  } else if (tool.type === "position_compensation") {
-    detail = tool.message || "";
-  } else if (tool.type === "classify") {
-    detail = `${tool.label}  confidence ${(tool.confidence * 100).toFixed(1)}%  (need ${(tool.min_confidence * 100).toFixed(0)}%)`;
-    if (tool.residual != null) detail += `  difference ${(tool.residual * 100).toFixed(1)}%`;
-  } else if (tool.type === "ocr") {
-    detail = tool.text ? `Read: ${tool.text}` : (tool.message || "No text");
-    if (tool.expected) detail += `  expected: ${tool.expected}`;
-  } else if (tool.type === "code") {
-    detail = tool.codes?.length
-      ? tool.codes.map((c) => `${c.type}: ${c.value}`).join(", ")
-      : (tool.message || "No code");
-    if (tool.expected) detail += `  expected: ${tool.expected}`;
-  } else if (tool.type === "robotic") {
-    const objs = tool.objects || [];
-    detail = objs.length
-      ? objs.slice(0, 4).map((o) => `#${o.id} ${o.class_name || ""} (${Number(o.x).toFixed(0)},${Number(o.y).toFixed(0)},a=${Number(o.a).toFixed(1)})`).join(" · ")
-      : (tool.message || "No objects");
-    if (objs.length > 4) detail += ` · +${objs.length - 4}`;
-  }
+  const render = window.SVisionTools?.detail?.(tool.type);
+  const detail = render ? render(tool) : (tool.message || "");
   return `${detail} · ${Number(tool.elapsed_ms || 0).toFixed(1)} ms`;
 }
 
