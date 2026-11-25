@@ -510,6 +510,270 @@ class ProjectStore:
             raise FileNotFoundError("Model image is not saved.")
         return path
 
+    # --- Robotic tool: classes, instances, calib, register images ---
+
+    def _robot_root(self, project_id: str, tool_id: str) -> Path:
+        return _tool_dir(project_id, tool_id)
+
+    def _robot_classes_dir(self, project_id: str, tool_id: str) -> Path:
+        return self._robot_root(project_id, tool_id) / "classes"
+
+    def robot_state(self, project_id: str, tool_id: str) -> dict:
+        self._require_tool(project_id, tool_id)
+        state = self._load_state(project_id, tool_id)
+        state.setdefault("robot", {"classes": [], "pending_marks": []})
+        classes = []
+        root = self._robot_classes_dir(project_id, tool_id)
+        if root.exists():
+            for folder in sorted(root.iterdir()):
+                if not folder.is_dir():
+                    continue
+                meta_path = folder / "meta.json"
+                meta = _read_json(meta_path) if meta_path.exists() else {"id": folder.name, "name": folder.name, "color": "#1ad4c0"}
+                inst_dir = folder / "instances"
+                instances = []
+                if inst_dir.exists():
+                    for jp in sorted(inst_dir.glob("*.json")):
+                        try:
+                            instances.append(_read_json(jp))
+                        except Exception:
+                            continue
+                classes.append(
+                    {
+                        "id": meta.get("id") or folder.name,
+                        "name": meta.get("name") or folder.name,
+                        "color": meta.get("color") or "#1ad4c0",
+                        "instance_count": len(instances),
+                        "instances": instances,
+                    }
+                )
+        state["robot"]["classes"] = classes
+        calib = self.robot_calib(project_id, tool_id)
+        state["robot"]["calib"] = calib
+        return state
+
+    def robot_ensure_class(self, project_id: str, tool_id: str, name: str, color: str = "#1ad4c0", class_id: str | None = None) -> dict:
+        self._require_tool(project_id, tool_id)
+        cid = (class_id or uuid.uuid4().hex[:10]).strip()
+        folder = self._robot_classes_dir(project_id, tool_id) / cid
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "instances").mkdir(parents=True, exist_ok=True)
+        meta = {"id": cid, "name": (name or "Part").strip() or "Part", "color": color or "#1ad4c0"}
+        _write_json(folder / "meta.json", meta)
+        return meta
+
+    def robot_delete_class(self, project_id: str, tool_id: str, class_id: str) -> None:
+        self._require_tool(project_id, tool_id)
+        folder = self._robot_classes_dir(project_id, tool_id) / class_id
+        if folder.exists():
+            shutil.rmtree(folder)
+
+    def robot_add_register_image(self, project_id: str, tool_id: str, filename: str, raw: bytes) -> dict:
+        self._require_tool(project_id, tool_id)
+        image = self._decode(raw)
+        folder = self._robot_root(project_id, tool_id) / "register_images"
+        folder.mkdir(parents=True, exist_ok=True)
+        img_id = uuid.uuid4().hex[:10]
+        ext = Path(filename).suffix.lower()
+        if ext not in {".png", ".jpg", ".jpeg", ".bmp", ".webp"}:
+            ext = ".png"
+        path = folder / f"{img_id}{ext}"
+        path.write_bytes(raw)
+        thumb = folder / f"{img_id}_thumb.jpg"
+        cv2.imwrite(str(thumb), self._thumb(image), [int(cv2.IMWRITE_JPEG_QUALITY), 75])
+        state = self._load_state(project_id, tool_id)
+        robot = state.setdefault("robot", {})
+        images = robot.setdefault("register_images", [])
+        record = {
+            "id": img_id,
+            "filename": Path(filename).name,
+            "width": int(image.shape[1]),
+            "height": int(image.shape[0]),
+            "added": _now(),
+        }
+        images.append(record)
+        self._save_state(project_id, tool_id, state)
+        return record
+
+    def robot_list_register_images(self, project_id: str, tool_id: str) -> list[dict]:
+        state = self.robot_state(project_id, tool_id)
+        return list((state.get("robot") or {}).get("register_images") or [])
+
+    def robot_register_image_path(self, project_id: str, tool_id: str, image_id: str, thumb: bool = False) -> Path:
+        folder = self._robot_root(project_id, tool_id) / "register_images"
+        if thumb:
+            path = folder / f"{image_id}_thumb.jpg"
+            if path.exists():
+                return path
+        matches = [p for p in folder.glob(f"{image_id}.*") if "_thumb" not in p.name]
+        if not matches:
+            raise FileNotFoundError("Register image not found.")
+        return matches[0]
+
+    def robot_delete_register_image(self, project_id: str, tool_id: str, image_id: str) -> None:
+        folder = self._robot_root(project_id, tool_id) / "register_images"
+        for path in folder.glob(f"{image_id}*"):
+            path.unlink(missing_ok=True)
+        state = self._load_state(project_id, tool_id)
+        images = (state.get("robot") or {}).get("register_images") or []
+        state.setdefault("robot", {})["register_images"] = [i for i in images if i.get("id") != image_id]
+        self._save_state(project_id, tool_id, state)
+
+    def robot_mark_instance(
+        self,
+        project_id: str,
+        tool_id: str,
+        *,
+        class_id: str,
+        image_id: str | None,
+        image_bytes: bytes | None,
+        box: dict,
+    ) -> dict:
+        """Mark a rotated box on an image and save a template instance crop."""
+        self._require_tool(project_id, tool_id)
+        if image_bytes:
+            image = self._decode(image_bytes)
+        elif image_id:
+            image = self._decode(self.robot_register_image_path(project_id, tool_id, image_id).read_bytes())
+        else:
+            # Fall back to current scene image
+            files = current_images.read(project_id)
+            if not files:
+                raise ValueError("Add a register image or store a scene image first.")
+            image = self._decode(files[0][1])
+            image_id = "current"
+
+        class_folder = self._robot_classes_dir(project_id, tool_id) / class_id
+        if not class_folder.exists():
+            raise FileNotFoundError("Class not found. Add a class first.")
+        meta = _read_json(class_folder / "meta.json")
+        crop = self._crop_rotated(image, box)
+        if crop.shape[0] < 8 or crop.shape[1] < 8:
+            raise ValueError("Draw a larger region around the object.")
+        inst_id = uuid.uuid4().hex[:10]
+        inst_dir = class_folder / "instances"
+        inst_dir.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(inst_dir / f"{inst_id}.png"), crop)
+        record = {
+            "id": inst_id,
+            "class_id": class_id,
+            "class_name": meta.get("name") or class_id,
+            "image_id": image_id or "",
+            "width": int(crop.shape[1]),
+            "height": int(crop.shape[0]),
+            "box": box,
+            "added": _now(),
+        }
+        _write_json(inst_dir / f"{inst_id}.json", record)
+        return record
+
+    def robot_delete_instance(self, project_id: str, tool_id: str, class_id: str, instance_id: str) -> None:
+        folder = self._robot_classes_dir(project_id, tool_id) / class_id / "instances"
+        for path in folder.glob(f"{instance_id}.*"):
+            path.unlink(missing_ok=True)
+
+    def robot_list_templates(self, project_id: str, tool_id: str) -> list[dict]:
+        """Load all instance template images for matching."""
+        out: list[dict] = []
+        root = self._robot_classes_dir(project_id, tool_id)
+        if not root.exists():
+            return out
+        for folder in sorted(root.iterdir()):
+            if not folder.is_dir():
+                continue
+            meta_path = folder / "meta.json"
+            meta = _read_json(meta_path) if meta_path.exists() else {"id": folder.name, "name": folder.name}
+            inst_dir = folder / "instances"
+            if not inst_dir.exists():
+                continue
+            for png in sorted(inst_dir.glob("*.png")):
+                img = cv2.imread(str(png), cv2.IMREAD_GRAYSCALE)
+                if img is None or img.size == 0:
+                    continue
+                out.append(
+                    {
+                        "class_id": meta.get("id") or folder.name,
+                        "class_name": meta.get("name") or folder.name,
+                        "instance_id": png.stem,
+                        "image": img,
+                    }
+                )
+        return out
+
+    def robot_calib(self, project_id: str, tool_id: str) -> dict:
+        path = self._robot_root(project_id, tool_id) / "calib.json"
+        if not path.exists():
+            return {"ready": False, "points": [], "H": None}
+        try:
+            data = _read_json(path)
+        except Exception:
+            return {"ready": False, "points": [], "H": None}
+        return data if isinstance(data, dict) else {"ready": False, "points": [], "H": None}
+
+    def robot_save_calib(self, project_id: str, tool_id: str, points: list[dict]) -> dict:
+        self._require_tool(project_id, tool_id)
+        if len(points) < 4:
+            raise ValueError("Need 4 pixel/robot point pairs.")
+        src = np.array([[float(p["px"]), float(p["py"])] for p in points[:4]], dtype=np.float32)
+        dst = np.array([[float(p["rx"]), float(p["ry"])] for p in points[:4]], dtype=np.float32)
+        H, _ = cv2.findHomography(src, dst, method=0)
+        if H is None:
+            raise ValueError("Could not compute homography from those points.")
+        data = {
+            "ready": True,
+            "points": points[:4],
+            "H": H.tolist(),
+            "updated": _now(),
+        }
+        _write_json(self._robot_root(project_id, tool_id) / "calib.json", data)
+        return data
+
+    def robot_clear_calib(self, project_id: str, tool_id: str) -> None:
+        path = self._robot_root(project_id, tool_id) / "calib.json"
+        path.unlink(missing_ok=True)
+
+    def robot_homography(self, project_id: str, tool_id: str) -> np.ndarray | None:
+        calib = self.robot_calib(project_id, tool_id)
+        if not calib.get("ready") or not calib.get("H"):
+            return None
+        return np.asarray(calib["H"], dtype=np.float64)
+
+    def robot_convert_point(self, project_id: str, tool_id: str, px: float, py: float) -> dict:
+        H = self.robot_homography(project_id, tool_id)
+        if H is None:
+            raise ValueError("Calibration is not ready.")
+        pt = np.array([[[float(px), float(py)]]], dtype=np.float32)
+        out = cv2.perspectiveTransform(pt, H)
+        return {"px": float(px), "py": float(py), "rx": float(out[0, 0, 0]), "ry": float(out[0, 0, 1])}
+
+    @staticmethod
+    def _crop_rotated(image: np.ndarray, box: dict) -> np.ndarray:
+        h, w = image.shape[:2]
+        cx = float(box.get("cx", 0.5))
+        cy = float(box.get("cy", 0.5))
+        bw = float(box.get("w", 0.2))
+        bh = float(box.get("h", 0.2))
+        angle = float(box.get("angle", 0))
+        # Normalized vs pixels
+        if max(cx, cy, bw, bh) <= 1.5:
+            cx *= w
+            cy *= h
+            bw *= w
+            bh *= h
+        bw = max(8.0, bw)
+        bh = max(8.0, bh)
+        matrix = cv2.getRotationMatrix2D((cx, cy), angle, 1.0)
+        rotated = cv2.warpAffine(image, matrix, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+        x0 = int(round(cx - bw / 2))
+        y0 = int(round(cy - bh / 2))
+        x1 = int(round(cx + bw / 2))
+        y1 = int(round(cy + bh / 2))
+        x0 = max(0, min(w - 1, x0))
+        y0 = max(0, min(h - 1, y0))
+        x1 = max(x0 + 1, min(w, x1))
+        y1 = max(y0 + 1, min(h, y1))
+        return rotated[y0:y1, x0:x1]
+
     def train(self, project_id: str, tool_id: str) -> dict:
         with _lock:
             tool = self._require_tool(project_id, tool_id)
@@ -584,6 +848,11 @@ class ProjectStore:
             except KeyError:
                 continue
             state = self._load_state(data["id"], item["id"])
+            if item["type"] == "robotic":
+                try:
+                    state = self.robot_state(data["id"], item["id"])
+                except Exception:
+                    pass
             item["state"] = state
             tools.append(item)
         public.setdefault("flow", default_flow())["tools"] = tools

@@ -121,6 +121,16 @@ of the License, or (at your option) any later version.
     </table>
     <p>Judgment codes (holding / OPC node): <code>0</code> idle, <code>1</code> OK, <code>2</code> NG, <code>3</code> ERROR. Holding values stay until the next measure; coil outputs pulse then clear.</p>
 
+    <h2 id="robotic">Robotic tool</h2>
+    <ul>
+      <li>Add <strong>Robotic</strong> to the flow (Edit layout).</li>
+      <li><strong>Template</strong> mode: Register panel — add images, draw a box, set angle, Mark (Single or Multi class).</li>
+      <li><strong>Contour</strong> mode: finds blobs in the search region (no register needed).</li>
+      <li><strong>Calibrate</strong>: 4 pixel↔robot pairs → homography for <code>rx</code>/<code>ry</code>.</li>
+      <li>WebSocket: <code>ws://&lt;host&gt;:&lt;port&gt;/ws/robot/{scene_id}/{tool_id}</code> — stream mode <strong>On trigger</strong> or <strong>Continuous</strong>.</li>
+      <li>JSON payload includes <code>count</code>, <code>objects[]</code> with <code>id</code>, <code>class_name</code>, <code>x</code>, <code>y</code>, <code>a</code>, <code>rx</code>, <code>ry</code>, <code>ra</code>.</li>
+    </ul>
+
     <h2 id="modbus">Modbus TCP</h2>
     <h3>Connection</h3>
     <ul>

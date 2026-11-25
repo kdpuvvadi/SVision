@@ -122,6 +122,12 @@ class MeasureService:
                 handshake.finish_ok(elapsed, result)
             else:
                 handshake.finish_ng(elapsed, result, result.get("message") or "NG")
+            try:
+                from app.core.robot_stream import robot_stream
+
+                robot_stream.publish_from_measure(job.project_id, result)
+            except Exception:
+                pass
             print(
                 f"[Measure] done judgment={overall_judgment} elapsed_ms={elapsed:.1f} "
                 f"message={result.get('message') or ''}",
