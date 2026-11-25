@@ -113,7 +113,9 @@ class OpcUaAdapter:
                     except Exception:
                         value = False
                     if value and not last_trigger:
-                        print("[OPC UA] Trigger=true received", flush=True)
+                        from app.core.logutil import log
+
+                        log("[OPC UA] Trigger=true received")
                         handshake.set_trigger(True)
                         try:
                             await trigger.write_value(False)
