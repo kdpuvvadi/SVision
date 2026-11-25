@@ -222,6 +222,9 @@ class ShapeSearchTool(Tool):
         step = float(cfg.get("angle_step") or 2)
         angles = _angle_list(span, step)
         inv = 1.0 / scale
+        # Unrotated model size in full-image pixels (for outline drawing).
+        model_w = float(gray_model.shape[1]) * inv
+        model_h = float(gray_model.shape[0]) * inv
 
         best = None
         for angle in angles:
@@ -241,14 +244,12 @@ class ShapeSearchTool(Tool):
                     "confidence": score,
                     "x": x0 + (px + templ.shape[1] / 2.0) * inv,
                     "y": y0 + (py + templ.shape[0] / 2.0) * inv,
-                    "width": float(templ.shape[1]) * inv,
-                    "height": float(templ.shape[0]) * inv,
+                    "width": model_w,
+                    "height": model_h,
                     "angle": float(angle),
-                    "tl": (x0 + px * inv, y0 + py * inv),
                 }
 
         elapsed = (time.perf_counter() - started) * 1000.0
-        view = None
         found = best is not None and best["confidence"] > 0
 
         if not found:
@@ -262,7 +263,7 @@ class ShapeSearchTool(Tool):
                 "accel": accel.get("id", "cpu"),
                 "message": "Registered pattern was not found.",
                 "elapsed_ms": elapsed,
-            }, view
+            }, None
 
         passed = best["confidence"] >= min_confidence
         pose = {
@@ -274,6 +275,7 @@ class ShapeSearchTool(Tool):
             "confidence": best["confidence"],
             "shape": "model",
         }
+        overlay = self._draw_hit(image, best, passed)
         return {
             "id": tool.get("id"),
             "type": self.type,
@@ -290,19 +292,34 @@ class ShapeSearchTool(Tool):
             "pose": pose,
             "message": f"Pattern  confidence {best['confidence'] * 100:.1f}%  ∠{best['angle']:.1f}°",
             "elapsed_ms": elapsed,
-        }, view
+        }, overlay
 
     @staticmethod
-    def _mark(view: np.ndarray, found: dict, factor: float) -> None:
-        color = (40, 220, 160) if found["confidence"] >= 0.55 else (60, 60, 230)
-        tlx, tly = found["tl"]
-        x0 = int(tlx / factor)
-        y0 = int(tly / factor)
-        x1 = int((tlx + found["width"]) / factor)
-        y1 = int((tly + found["height"]) / factor)
-        cv2.rectangle(view, (x0, y0), (x1, y1), color, 2)
-        center = (int(round(found["x"] / factor)), int(round(found["y"] / factor)))
-        cv2.drawMarker(view, center, color, cv2.MARKER_CROSS, 16, 2)
+    def _draw_hit(image: np.ndarray, found: dict, passed: bool) -> np.ndarray:
+        view = image.copy()
+        color = (40, 220, 160) if passed else (60, 60, 230)
+        thick = max(2, int(round(min(view.shape[:2]) / 320)))
+        cx, cy = float(found["x"]), float(found["y"])
+        rw, rh = float(found["width"]), float(found["height"])
+        angle = float(found["angle"])
+        pts = cv2.boxPoints(((cx, cy), (rw, rh), angle))
+        cv2.polylines(view, [np.int32(pts)], True, color, thick, cv2.LINE_AA)
+        rad = np.deg2rad(angle)
+        tip = (cx - rh * 0.55 * np.sin(rad), cy - rh * 0.55 * np.cos(rad))
+        cv2.line(
+            view,
+            (int(round(cx)), int(round(cy))),
+            (int(round(tip[0])), int(round(tip[1]))),
+            color,
+            thick,
+            cv2.LINE_AA,
+        )
+        cv2.drawMarker(view, (int(round(cx)), int(round(cy))), color, cv2.MARKER_CROSS, 16, thick)
+        label = f"{found['confidence'] * 100:.0f}%  {angle:.1f} deg"
+        lx, ly = int(round(cx) + 10), int(round(cy) - 12)
+        cv2.putText(view, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (20, 20, 20), 3, cv2.LINE_AA)
+        cv2.putText(view, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA)
+        return view
 
     @staticmethod
     def _load_model(project_id: str, tool_id: str) -> np.ndarray | None:

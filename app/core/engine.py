@@ -46,6 +46,12 @@ def _fit_preview(image: np.ndarray, limit: int = 720) -> np.ndarray:
     )
 
 
+def _rotated_box_points(cx: float, cy: float, rw: float, rh: float, angle_deg: float) -> np.ndarray:
+    """Axis-aligned size (rw, rh) rotated by angle_deg around center → 4 corner points."""
+    rect = ((float(cx), float(cy)), (float(rw), float(rh)), float(angle_deg))
+    return cv2.boxPoints(rect)
+
+
 def _mark_pose(view: np.ndarray, result: dict, src_w: int, src_h: int) -> np.ndarray:
     if result.get("x") is None or not result.get("width") or not result.get("height") or src_w <= 0 or src_h <= 0:
         return view
@@ -56,11 +62,32 @@ def _mark_pose(view: np.ndarray, result: dict, src_w: int, src_h: int) -> np.nda
     y = float(result["y"])
     rw = float(result["width"])
     rh = float(result["height"])
+    angle = float(result.get("angle") or 0.0)
     color = (40, 220, 160) if result.get("judgment") == "OK" else (60, 60, 230)
-    x0, y0 = int((x - rw / 2.0) * sx), int((y - rh / 2.0) * sy)
-    x1, y1 = int((x + rw / 2.0) * sx), int((y + rh / 2.0) * sy)
-    cv2.rectangle(marked, (x0, y0), (x1, y1), color, 2)
-    cv2.drawMarker(marked, (int(x * sx), int(y * sy)), color, cv2.MARKER_CROSS, 14, 2)
+    thick = max(2, int(round(min(marked.shape[:2]) / 320)))
+    # Draw in source pixels then scale, so rotation matches model size/angle.
+    pts = _rotated_box_points(x, y, rw, rh, angle)
+    pts[:, 0] *= sx
+    pts[:, 1] *= sy
+    cv2.polylines(marked, [np.int32(pts)], True, color, thick, cv2.LINE_AA)
+    # Orientation tick from center toward the "top" edge of the model.
+    rad = np.deg2rad(angle)
+    # OpenCV box angle: width axis; top of model is -90° in local frame (toward -height).
+    tip_x = x + (-rh * 0.55) * np.sin(rad)
+    tip_y = y + (-rh * 0.55) * np.cos(rad)
+    cv2.line(
+        marked,
+        (int(round(x * sx)), int(round(y * sy))),
+        (int(round(tip_x * sx)), int(round(tip_y * sy))),
+        color,
+        thick,
+        cv2.LINE_AA,
+    )
+    cv2.drawMarker(marked, (int(round(x * sx)), int(round(y * sy))), color, cv2.MARKER_CROSS, 14, thick)
+    label = f"{angle:.1f} deg"
+    lx, ly = int(round(x * sx) + 10), int(round(y * sy) - 10)
+    cv2.putText(marked, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (20, 20, 20), 3, cv2.LINE_AA)
+    cv2.putText(marked, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
     return marked
 
 
