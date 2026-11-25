@@ -499,6 +499,25 @@ class ProjectStore:
             crop = image[y0:y1, x0:x1]
         if crop.shape[0] < 8 or crop.shape[1] < 8:
             raise ValueError("Draw a larger region around the pattern.")
+        # Trim flat border so later overlays hug the pattern, not empty padding.
+        try:
+            from app.tools.shape_search import _trim_model
+
+            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
+            trimmed = _trim_model(gray, pad=1)
+            if trimmed.shape[0] >= 8 and trimmed.shape[1] >= 8 and trimmed.shape != gray.shape:
+                if crop.ndim == 3:
+                    # Re-apply the same crop window on color by matching trim offsets via gray.
+                    full = gray
+                    # Find trimmed window inside full by template match of trimmed.
+                    res = cv2.matchTemplate(full, trimmed, cv2.TM_SQDIFF)
+                    _, _, loc, _ = cv2.minMaxLoc(res)
+                    tx, ty = int(loc[0]), int(loc[1])
+                    crop = crop[ty : ty + trimmed.shape[0], tx : tx + trimmed.shape[1]]
+                else:
+                    crop = trimmed
+        except Exception:
+            pass
         folder = _tool_dir(project_id, tool_id)
         folder.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(folder / "shape_model.png"), crop)

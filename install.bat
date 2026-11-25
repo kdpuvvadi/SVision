@@ -27,7 +27,27 @@ call ".venv\Scripts\activate.bat"
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 echo.
+rem OCR GPU is optional: requirements.txt installs CPU onnxruntime via rapidocr-onnxruntime.
+rem Offer CUDA OCR only when an NVIDIA GPU is present; skip quietly otherwise.
+where nvidia-smi >nul 2>&1
+if errorlevel 1 goto after_gpu_ocr
+echo.
+echo NVIDIA GPU detected.
+echo OCR GPU needs onnxruntime-gpu (replaces CPU onnxruntime). Shape Search already uses OpenCL.
+set /p GPU_OCR="Install onnxruntime-gpu for CUDA OCR? [y/N] "
+if /i not "%GPU_OCR%"=="y" if /i not "%GPU_OCR%"=="yes" goto after_gpu_ocr
+echo Installing onnxruntime-gpu...
+pip uninstall -y onnxruntime >nul 2>&1
+pip install onnxruntime-gpu
+if errorlevel 1 (
+  echo onnxruntime-gpu install failed — OCR will keep using CPU. Shape Search OpenCL is unchanged.
+) else (
+  echo OCR CUDA provider installed.
+)
+:after_gpu_ocr
+echo.
 echo Installed.
+echo Note: default install is CPU OCR. OpenCL GPU for Shape Search needs no extra package.
 set /p RUN_NOW="Start SVision now with run.bat? [y/N] "
 if /i "%RUN_NOW%"=="y" goto run_app
 if /i "%RUN_NOW%"=="yes" goto run_app

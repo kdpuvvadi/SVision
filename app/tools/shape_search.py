@@ -43,18 +43,51 @@ def _edges(gray: np.ndarray) -> np.ndarray:
     return cv2.Canny(blur, 40, 120)
 
 
-def _rotate(gray: np.ndarray, angle: float) -> np.ndarray:
-    if abs(angle) < 0.05:
-        return gray
+def _rotate(gray: np.ndarray, angle: float) -> tuple[np.ndarray, np.ndarray]:
+    """Rotate template; return (image, 2x3 matrix mapping src → dst pixels)."""
     h, w = gray.shape[:2]
-    matrix = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), angle, 1.0)
+    if abs(angle) < 0.05:
+        matrix = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float64)
+        return gray, matrix
+    matrix = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), float(angle), 1.0)
     cos = abs(matrix[0, 0])
     sin = abs(matrix[0, 1])
     nw = int(h * sin + w * cos)
     nh = int(h * cos + w * sin)
     matrix[0, 2] += (nw - w) / 2.0
     matrix[1, 2] += (nh - h) / 2.0
-    return cv2.warpAffine(gray, matrix, (nw, nh), flags=cv2.INTER_LINEAR, borderValue=0)
+    out = cv2.warpAffine(gray, matrix, (nw, nh), flags=cv2.INTER_LINEAR, borderValue=0)
+    return out, matrix
+
+
+def _warp_rect_corners(mw: int, mh: int, matrix: np.ndarray) -> np.ndarray:
+    """Map the model rectangle corners through the same matrix used to build the template."""
+    corners = np.array([[0.0, 0.0], [mw, 0.0], [mw, mh], [0.0, mh]], dtype=np.float64)
+    ones = np.ones((4, 1), dtype=np.float64)
+    return (matrix @ np.hstack([corners, ones]).T).T
+
+
+def _trim_model(gray: np.ndarray, pad: int = 2) -> np.ndarray:
+    """Drop empty border so the overlay hugs the pattern, not padded canvas."""
+    if gray.size == 0:
+        return gray
+    # Content = pixels that differ from the dominant border color.
+    border = np.concatenate(
+        [gray[0, :].ravel(), gray[-1, :].ravel(), gray[:, 0].ravel(), gray[:, -1].ravel()]
+    )
+    # Mode via median is stable for flat borders.
+    bg = float(np.median(border))
+    mask = np.abs(gray.astype(np.float32) - bg) > 12.0
+    if not np.any(mask):
+        return gray
+    ys, xs = np.where(mask)
+    y0 = max(0, int(ys.min()) - pad)
+    y1 = min(gray.shape[0], int(ys.max()) + pad + 1)
+    x0 = max(0, int(xs.min()) - pad)
+    x1 = min(gray.shape[1], int(xs.max()) + pad + 1)
+    if (x1 - x0) < 8 or (y1 - y0) < 8:
+        return gray
+    return gray[y0:y1, x0:x1]
 
 
 def _small(image: np.ndarray, max_edge: int = _MAX_EDGE) -> tuple[np.ndarray, float, float]:
@@ -102,18 +135,6 @@ def _match_template(search: np.ndarray, templ: np.ndarray, opencl: bool) -> tupl
         result = cv2.matchTemplate(search, templ, cv2.TM_CCOEFF_NORMED)
     _, value, _, loc = cv2.minMaxLoc(result)
     return float(value), int(loc[0]), int(loc[1])
-
-
-def _oriented_corners_small(cx: float, cy: float, mw: float, mh: float, angle_deg: float) -> np.ndarray:
-    """Model corners in the downscaled search coordinate system (getRotationMatrix2D convention)."""
-    rad = np.deg2rad(float(angle_deg))
-    cos_a, sin_a = np.cos(rad), np.sin(rad)
-    hw, hh = float(mw) / 2.0, float(mh) / 2.0
-    local = ((-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh))
-    return np.array(
-        [[cx + cos_a * lx + sin_a * ly, cy - sin_a * lx + cos_a * ly] for lx, ly in local],
-        dtype=np.float64,
-    )
 
 
 def _map_points_to_full(pts_small: np.ndarray, x0: int, y0: int, sx: float, sy: float) -> np.ndarray:
@@ -221,13 +242,14 @@ class ShapeSearchTool(Tool):
         roi = image[y0:y1, x0:x1]
         small, sx, sy = _small(roi)
         gray_search = _gray(small)
-        # Scale model with the same nominal factor as the search ROI long-edge shrink.
-        nom = min(sx, sy)
-        model_cap = max(8, int(round(max(model.shape[:2]) * nom)))
-        model_small, msx, msy = _small(model, model_cap)
-        gray_model = _gray(model_small)
+        # Trim empty border, then resize with the SAME sx/sy as the search image
+        # so overlay corners map back to full-resolution without scale drift.
+        gray_model = _trim_model(_gray(model) if model.ndim == 3 else model)
+        mw0, mh0 = int(gray_model.shape[1]), int(gray_model.shape[0])
+        mw = max(1, int(round(mw0 * sx)))
+        mh = max(1, int(round(mh0 * sy)))
+        gray_model = cv2.resize(gray_model, (mw, mh), interpolation=cv2.INTER_AREA if (mw < mw0 or mh < mh0) else cv2.INTER_LINEAR)
         sh, sw = gray_search.shape[:2]
-        mh, mw = gray_model.shape[:2]
         if mh >= sh or mw >= sw:
             gray_model = cv2.resize(gray_model, (max(1, sw // 2), max(1, sh // 2)), interpolation=cv2.INTER_LINEAR)
             mh, mw = gray_model.shape[:2]
@@ -239,27 +261,31 @@ class ShapeSearchTool(Tool):
 
         best = None
         for angle in angles:
-            templ_gray = _rotate(gray_model, angle)
+            templ_gray, matrix = _rotate(gray_model, angle)
             if templ_gray.shape[0] >= gray_search.shape[0] or templ_gray.shape[1] >= gray_search.shape[1]:
                 continue
+            # Localize with gray (stable). Edges only refine confidence when they agree.
+            score_g, px, py = _match_template(gray_search, templ_gray, opencl)
             score_e, px_e, py_e = _match_template(search_edges, _edges(templ_gray), opencl)
-            score_g, px_g, py_g = _match_template(gray_search, templ_gray, opencl)
-            if score_e >= score_g:
-                score, px, py, templ = score_e, px_e, py_e, templ_gray
-            else:
-                score, px, py, templ = score_g, px_g, py_g, templ_gray
-            score = max(0.0, float(score))
+            score = max(0.0, float(score_g))
+            if score_e > score_g and abs(px_e - px) <= 3 and abs(py_e - py) <= 3:
+                score = max(score, float(score_e))
             if best is not None and score <= best["confidence"]:
                 continue
-            cx_s = px + templ.shape[1] / 2.0
-            cy_s = py + templ.shape[0] / 2.0
-            # Corners in search space from the same model used to match, then map with real sx/sy.
-            pts_s = _oriented_corners_small(cx_s, cy_s, float(mw), float(mh), angle)
+            # Corners = model rectangle warped by the SAME matrix as the matched template,
+            # then shifted to the match location — locks the outline to the part.
+            pts_s = _warp_rect_corners(mw, mh, matrix)
+            pts_s[:, 0] += px
+            pts_s[:, 1] += py
             pts = _map_points_to_full(pts_s, x0, y0, sx, sy)
-            tip_s = np.array(
-                [[cx_s, cy_s], [cx_s + (-mh * 0.55) * np.sin(np.deg2rad(angle)), cy_s + (-mh * 0.55) * np.cos(np.deg2rad(angle))]],
-                dtype=np.float64,
-            )
+            center_s = np.array([[mw / 2.0, mh / 2.0]], dtype=np.float64)
+            ones = np.ones((1, 1), dtype=np.float64)
+            center_t = (matrix @ np.hstack([center_s, ones]).T).T[0]
+            tip_local = np.array([[mw / 2.0, mh / 2.0 - mh * 0.55]], dtype=np.float64)
+            tip_t = (matrix @ np.hstack([tip_local, ones]).T).T[0]
+            tip_s = np.vstack([center_t, tip_t])
+            tip_s[:, 0] += px
+            tip_s[:, 1] += py
             tip = _map_points_to_full(tip_s, x0, y0, sx, sy)
             best = {
                 "confidence": score,
