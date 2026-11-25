@@ -1307,6 +1307,7 @@ function bind() {
       return;
     }
     if (e.target.id === "modelCanvas") {
+      if (window.SVisionShapeModel?.ownsCanvas) return;
       const p = canvasPoint(e, "modelCanvas");
       state.modelDrawing = { x: p.x, y: p.y, x2: p.x, y2: p.y };
       return;
@@ -1336,7 +1337,7 @@ function bind() {
       }
       return;
     }
-    if (state.modelDrawing && $("modelCanvas")) {
+    if (state.modelDrawing && $("modelCanvas") && !window.SVisionShapeModel?.ownsCanvas) {
       const p = canvasPoint(e, "modelCanvas");
       state.modelDrawing.x2 = p.x;
       state.modelDrawing.y2 = p.y;
@@ -1355,7 +1356,7 @@ function bind() {
       drawRobotRegCanvas();
       return;
     }
-    if (state.modelDrawing) {
+    if (state.modelDrawing && !window.SVisionShapeModel?.ownsCanvas) {
       const d = state.modelDrawing;
       state.modelDrawing = null;
       const w = Math.abs(d.x2 - d.x);
@@ -2027,6 +2028,10 @@ async function robotMark(classId) {
 }
 
 function drawModelCanvas() {
+  if (window.SVisionShapeModel?.draw) {
+    window.SVisionShapeModel.draw();
+    return;
+  }
   const canvas = $("modelCanvas");
   if (!canvas) return;
   const ctx = canvas.getContext("2d");

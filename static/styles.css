@@ -431,6 +431,11 @@ main { height: calc(100% - 54px); }
 .thumb div { display: flex; justify-content: space-between; align-items: center; padding: 4px 6px; font-size: 12px; }
 .thumb button { padding: 2px 6px; }
 .model-preview { max-width: 220px; max-height: 140px; background: #000; border: 1px solid var(--line); }
+.model-toolbar { flex-wrap: wrap; }
+.model-stage { min-height: 320px; }
+#modelCanvas { max-width: 100%; cursor: crosshair; touch-action: none; }
+.model-roi-readout { font-variant-numeric: tabular-nums; }
+.accel-field .accel-detail { display: block; margin-top: 2px; }
 
 .tool-config { display: grid; grid-template-columns: 1.3fr 1fr 1fr; gap: 12px; }
 article {
