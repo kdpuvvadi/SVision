@@ -435,6 +435,7 @@ main { height: calc(100% - 54px); }
 .model-stage { min-height: 320px; }
 #modelCanvas { max-width: 100%; cursor: crosshair; touch-action: none; }
 .model-roi-readout { font-variant-numeric: tabular-nums; }
+.model-angle-row input[type="number"] { width: 88px; }
 .accel-field .accel-detail { display: block; margin-top: 2px; }
 
 .tool-config { display: grid; grid-template-columns: 1.3fr 1fr 1fr; gap: 12px; }

@@ -479,8 +479,24 @@ class ProjectStore:
     def register_shape_model(self, project_id: str, tool_id: str, raw: bytes, roi: dict | None) -> dict:
         self._require_tool(project_id, tool_id)
         image = self._decode(raw)
-        x0, y0, x1, y1 = self._roi_pixels(image, roi)
-        crop = image[y0:y1, x0:x1]
+        roi = roi or {}
+        angle = float(roi.get("angle") or 0)
+        if abs(angle) >= 0.05:
+            cx = float(roi.get("x", 0)) + float(roi.get("w", 1)) / 2.0
+            cy = float(roi.get("y", 0)) + float(roi.get("h", 1)) / 2.0
+            crop = self._crop_rotated(
+                image,
+                {
+                    "cx": cx,
+                    "cy": cy,
+                    "w": float(roi.get("w", 1)),
+                    "h": float(roi.get("h", 1)),
+                    "angle": angle,
+                },
+            )
+        else:
+            x0, y0, x1, y1 = self._roi_pixels(image, roi)
+            crop = image[y0:y1, x0:x1]
         if crop.shape[0] < 8 or crop.shape[1] < 8:
             raise ValueError("Draw a larger region around the pattern.")
         folder = _tool_dir(project_id, tool_id)
@@ -491,6 +507,7 @@ class ProjectStore:
             "saved": True,
             "width": int(crop.shape[1]),
             "height": int(crop.shape[0]),
+            "angle": round(angle, 2),
             "registered_at": _now(),
         }
         self._save_state(project_id, tool_id, state)

@@ -35,12 +35,18 @@ def mount(app: Any) -> None:
         y: float = Form(0),
         w: float = Form(1),
         h: float = Form(1),
+        angle: float = Form(0),
     ) -> dict:
         raw = await file.read()
         if not raw:
             raise HTTPException(400, "Choose an image, then draw the pattern.")
         try:
-            return store.register_shape_model(project_id, tool_id, raw, {"x": x, "y": y, "w": w, "h": h})
+            return store.register_shape_model(
+                project_id,
+                tool_id,
+                raw,
+                {"x": x, "y": y, "w": w, "h": h, "angle": angle},
+            )
         except FileNotFoundError as exc:
             raise HTTPException(404, str(exc)) from exc
         except ValueError as exc:

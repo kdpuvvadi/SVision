@@ -1,13 +1,14 @@
-// SVision Shape Search tool UI — model register with zoom + edge/corner adjust.
+// SVision Shape Search tool UI — model register with zoom, rotate, edge/corner adjust.
 (function () {
   const T = window.SVisionTools;
   if (!T) return;
 
-  const HANDLE = 8;
-  const EDGE = 6;
+  const HANDLE = 9;
+  const EDGE = 7;
+  const ROT_OFFSET = 28;
   let editorBound = false;
   let view = { zoom: 1, panX: 0, panY: 0 };
-  let drag = null; // { mode, handle, startX, startY, roi0, pan0 }
+  let drag = null;
   let imgEl = null;
 
   function clamp(v, a, b) {
@@ -18,6 +19,24 @@
     return document.getElementById("modelCanvas");
   }
 
+  function angleOf(roi) {
+    return Number(roi?.angle || 0);
+  }
+
+  function setAngleInput(deg) {
+    const el = document.getElementById("modelBoxAngle");
+    if (el && document.activeElement !== el) el.value = String(Math.round(deg * 10) / 10);
+  }
+
+  function readAngleInput() {
+    const el = document.getElementById("modelBoxAngle");
+    return el ? Number(el.value) || 0 : 0;
+  }
+
+  function centerOf(roi) {
+    return { cx: roi.x + roi.w / 2, cy: roi.y + roi.h / 2 };
+  }
+
   function normPoint(e) {
     const canvas = canvasEl();
     if (!canvas || !canvas._fit) return null;
@@ -26,44 +45,74 @@
     const px = ((e.clientX - rect.left) / rect.width) * canvas.width;
     const py = ((e.clientY - rect.top) / rect.height) * canvas.height;
     return {
-      x: clamp((px - fit.x) / fit.w, 0, 1),
-      y: clamp((py - fit.y) / fit.h, 0, 1),
+      x: clamp((px - fit.x) / fit.w, -0.5, 1.5),
+      y: clamp((py - fit.y) / fit.h, -0.5, 1.5),
       cx: px,
       cy: py,
     };
   }
 
-  function hitHandle(p, roi) {
-    if (!roi || !p) return null;
+  /** Screen-space geometry for a (possibly rotated) ROI. */
+  function roiGeom(roi) {
     const canvas = canvasEl();
     const fit = canvas._fit;
-    const rx = fit.x + roi.x * fit.w;
-    const ry = fit.y + roi.y * fit.h;
-    const rw = roi.w * fit.w;
-    const rh = roi.h * fit.h;
-    const pts = {
-      nw: [rx, ry],
-      n: [rx + rw / 2, ry],
-      ne: [rx + rw, ry],
-      e: [rx + rw, ry + rh / 2],
-      se: [rx + rw, ry + rh],
-      s: [rx + rw / 2, ry + rh],
-      sw: [rx, ry + rh],
-      w: [rx, ry + rh / 2],
+    const cx = fit.x + (roi.x + roi.w / 2) * fit.w;
+    const cy = fit.y + (roi.y + roi.h / 2) * fit.h;
+    const bw = roi.w * fit.w;
+    const bh = roi.h * fit.h;
+    const ang = (angleOf(roi) * Math.PI) / 180;
+    return { cx, cy, bw, bh, ang, cos: Math.cos(ang), sin: Math.sin(ang) };
+  }
+
+  function toLocal(p, geom) {
+    const dx = p.cx - geom.cx;
+    const dy = p.cy - geom.cy;
+    return {
+      lx: dx * geom.cos + dy * geom.sin,
+      ly: -dx * geom.sin + dy * geom.cos,
     };
+  }
+
+  function handlePoints(geom) {
+    const { cx, cy, bw, bh, cos, sin } = geom;
+    const local = {
+      nw: [-bw / 2, -bh / 2],
+      n: [0, -bh / 2],
+      ne: [bw / 2, -bh / 2],
+      e: [bw / 2, 0],
+      se: [bw / 2, bh / 2],
+      s: [0, bh / 2],
+      sw: [-bw / 2, bh / 2],
+      w: [-bw / 2, 0],
+      rot: [0, -bh / 2 - ROT_OFFSET],
+    };
+    const out = {};
+    for (const [name, [lx, ly]] of Object.entries(local)) {
+      out[name] = [cx + lx * cos - ly * sin, cy + lx * sin + ly * cos];
+    }
+    return out;
+  }
+
+  function hitHandle(p, roi) {
+    if (!roi || !p) return null;
+    const geom = roiGeom(roi);
+    const pts = handlePoints(geom);
     for (const [name, [hx, hy]] of Object.entries(pts)) {
       if (Math.abs(p.cx - hx) <= HANDLE && Math.abs(p.cy - hy) <= HANDLE) return name;
     }
-    // Edge strips (between corners)
-    if (Math.abs(p.cy - ry) <= EDGE && p.cx >= rx && p.cx <= rx + rw) return "n";
-    if (Math.abs(p.cy - (ry + rh)) <= EDGE && p.cx >= rx && p.cx <= rx + rw) return "s";
-    if (Math.abs(p.cx - rx) <= EDGE && p.cy >= ry && p.cy <= ry + rh) return "w";
-    if (Math.abs(p.cx - (rx + rw)) <= EDGE && p.cy >= ry && p.cy <= ry + rh) return "e";
-    if (p.cx >= rx && p.cx <= rx + rw && p.cy >= ry && p.cy <= ry + rh) return "move";
+    const { lx, ly } = toLocal(p, geom);
+    const hw = geom.bw / 2;
+    const hh = geom.bh / 2;
+    if (Math.abs(ly + hh) <= EDGE && lx >= -hw && lx <= hw) return "n";
+    if (Math.abs(ly - hh) <= EDGE && lx >= -hw && lx <= hw) return "s";
+    if (Math.abs(lx + hw) <= EDGE && ly >= -hh && ly <= hh) return "w";
+    if (Math.abs(lx - hw) <= EDGE && ly >= -hh && ly <= hh) return "e";
+    if (lx >= -hw && lx <= hw && ly >= -hh && ly <= hh) return "move";
     return null;
   }
 
   function cursorFor(handle) {
+    if (handle === "rot") return "grab";
     const map = {
       n: "ns-resize",
       s: "ns-resize",
@@ -79,35 +128,80 @@
   }
 
   function applyHandle(handle, roi0, p0, p) {
-    const dx = p.x - p0.x;
-    const dy = p.y - p0.y;
-    let { x, y, w, h } = roi0;
-    const x2 = x + w;
-    const y2 = y + h;
-    let nx = x;
-    let ny = y;
-    let nx2 = x2;
-    let ny2 = y2;
-    if (handle === "move") {
-      nx = clamp(x + dx, 0, 1 - w);
-      ny = clamp(y + dy, 0, 1 - h);
-      return { x: nx, y: ny, w, h };
+    if (handle === "rot") {
+      const fit = canvasEl()._fit;
+      const c = centerOf(roi0);
+      const sx = fit.x + c.cx * fit.w;
+      const sy = fit.y + c.cy * fit.h;
+      const a0 = Math.atan2(p0.cy - sy, p0.cx - sx);
+      const a1 = Math.atan2(p.cy - sy, p.cx - sx);
+      let deg = angleOf(roi0) + ((a1 - a0) * 180) / Math.PI;
+      while (deg > 180) deg -= 360;
+      while (deg < -180) deg += 360;
+      return { ...roi0, angle: deg };
     }
-    if (handle.includes("n")) ny = y + dy;
-    if (handle.includes("s")) ny2 = y2 + dy;
-    if (handle.includes("w")) nx = x + dx;
-    if (handle.includes("e")) nx2 = x2 + dx;
-    const out = {
-      x: Math.min(nx, nx2),
-      y: Math.min(ny, ny2),
-      w: Math.abs(nx2 - nx),
-      h: Math.abs(ny2 - ny),
+
+    const geom0 = (() => {
+      // Build geom from roi0 using current fit (same as paint).
+      const fit = canvasEl()._fit;
+      const cx = fit.x + (roi0.x + roi0.w / 2) * fit.w;
+      const cy = fit.y + (roi0.y + roi0.h / 2) * fit.h;
+      const bw = roi0.w * fit.w;
+      const bh = roi0.h * fit.h;
+      const ang = (angleOf(roi0) * Math.PI) / 180;
+      return { cx, cy, bw, bh, ang, cos: Math.cos(ang), sin: Math.sin(ang), fit };
+    })();
+
+    const loc0 = toLocal(p0, geom0);
+    const loc1 = toLocal(p, geom0);
+    const dlx = loc1.lx - loc0.lx;
+    const dly = loc1.ly - loc0.ly;
+
+    let left = -geom0.bw / 2;
+    let right = geom0.bw / 2;
+    let top = -geom0.bh / 2;
+    let bottom = geom0.bh / 2;
+
+    if (handle === "move") {
+      const dx = p.x - p0.x;
+      const dy = p.y - p0.y;
+      return {
+        ...roi0,
+        x: clamp(roi0.x + dx, 0, 1 - roi0.w),
+        y: clamp(roi0.y + dy, 0, 1 - roi0.h),
+      };
+    }
+    if (handle.includes("n")) top += dly;
+    if (handle.includes("s")) bottom += dly;
+    if (handle.includes("w")) left += dlx;
+    if (handle.includes("e")) right += dlx;
+
+    const minSpan = 8;
+    if (right - left < minSpan) {
+      if (handle.includes("w")) left = right - minSpan;
+      else right = left + minSpan;
+    }
+    if (bottom - top < minSpan) {
+      if (handle.includes("n")) top = bottom - minSpan;
+      else bottom = top + minSpan;
+    }
+
+    const ncx = geom0.cx + ((left + right) / 2) * geom0.cos - ((top + bottom) / 2) * geom0.sin;
+    const ncy = geom0.cy + ((left + right) / 2) * geom0.sin + ((top + bottom) / 2) * geom0.cos;
+    const nbw = right - left;
+    const nbh = bottom - top;
+    const fit = geom0.fit;
+    const w = nbw / fit.w;
+    const h = nbh / fit.h;
+    const cx = (ncx - fit.x) / fit.w;
+    const cy = (ncy - fit.y) / fit.h;
+    return {
+      x: clamp(cx - w / 2, 0, 1),
+      y: clamp(cy - h / 2, 0, 1),
+      w: clamp(w, 0.005, 1),
+      h: clamp(h, 0.005, 1),
+      angle: angleOf(roi0),
     };
-    out.x = clamp(out.x, 0, 1);
-    out.y = clamp(out.y, 0, 1);
-    out.w = clamp(out.w, 0.005, 1 - out.x);
-    out.h = clamp(out.h, 0.005, 1 - out.y);
-    return out;
   }
 
   function updateReadout() {
@@ -115,10 +209,14 @@
     if (!el) return;
     const roi = state.modelRoi;
     if (!roi) {
-      el.textContent = "No selection — drag to draw, then drag edges/corners to fine-tune.";
+      el.textContent = "No selection — drag to draw, then drag edges/corners or the rotate handle.";
       return;
     }
-    el.textContent = `x ${(roi.x * 100).toFixed(1)}%  y ${(roi.y * 100).toFixed(1)}%  w ${(roi.w * 100).toFixed(1)}%  h ${(roi.h * 100).toFixed(1)}%  · zoom ${view.zoom.toFixed(2)}×`;
+    el.textContent =
+      `x ${(roi.x * 100).toFixed(1)}%  y ${(roi.y * 100).toFixed(1)}%  ` +
+      `w ${(roi.w * 100).toFixed(1)}%  h ${(roi.h * 100).toFixed(1)}%  ` +
+      `∠ ${angleOf(roi).toFixed(1)}°  · zoom ${view.zoom.toFixed(2)}×`;
+    setAngleInput(angleOf(roi));
   }
 
   function baseFit(canvas, iw, ih) {
@@ -139,43 +237,54 @@
 
     const drawRoi = (roi) => {
       if (!roi) return;
-      const fit = canvas._fit;
-      const rx = fit.x + roi.x * fit.w;
-      const ry = fit.y + roi.y * fit.h;
-      const rw = roi.w * fit.w;
-      const rh = roi.h * fit.h;
+      const geom = roiGeom(roi);
+      const { cx, cy, bw, bh, ang } = geom;
       ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(ang);
       ctx.fillStyle = "rgba(26, 212, 192, 0.12)";
-      ctx.fillRect(rx, ry, rw, rh);
+      ctx.fillRect(-bw / 2, -bh / 2, bw, bh);
       ctx.strokeStyle = "#1ad4c0";
       ctx.lineWidth = 2;
-      ctx.strokeRect(rx, ry, rw, rh);
-      const pts = [
-        [rx, ry],
-        [rx + rw / 2, ry],
-        [rx + rw, ry],
-        [rx + rw, ry + rh / 2],
-        [rx + rw, ry + rh],
-        [rx + rw / 2, ry + rh],
-        [rx, ry + rh],
-        [rx, ry + rh / 2],
+      ctx.strokeRect(-bw / 2, -bh / 2, bw, bh);
+      // Orientation tick (top)
+      ctx.beginPath();
+      ctx.moveTo(0, -bh / 2);
+      ctx.lineTo(0, -bh / 2 - ROT_OFFSET);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(0, -bh / 2 - ROT_OFFSET, 5, 0, Math.PI * 2);
+      ctx.fillStyle = "#ffb020";
+      ctx.fill();
+      ctx.strokeStyle = "#1ad4c0";
+      ctx.stroke();
+      // Local-space handles
+      const locals = [
+        [-bw / 2, -bh / 2],
+        [0, -bh / 2],
+        [bw / 2, -bh / 2],
+        [bw / 2, 0],
+        [bw / 2, bh / 2],
+        [0, bh / 2],
+        [-bw / 2, bh / 2],
+        [-bw / 2, 0],
       ];
       ctx.fillStyle = "#1ad4c0";
-      pts.forEach(([hx, hy]) => {
-        ctx.fillRect(hx - 4, hy - 4, 8, 8);
-      });
+      locals.forEach(([hx, hy]) => ctx.fillRect(hx - 4, hy - 4, 8, 8));
       ctx.restore();
     };
 
     const finish = () => {
-      const roi = drag && drag.mode === "draw"
-        ? {
-            x: Math.min(drag.start.x, drag.cur.x),
-            y: Math.min(drag.start.y, drag.cur.y),
-            w: Math.abs(drag.cur.x - drag.start.x),
-            h: Math.abs(drag.cur.y - drag.start.y),
-          }
-        : state.modelRoi;
+      const roi =
+        drag && drag.mode === "draw"
+          ? {
+              x: Math.min(drag.start.x, drag.cur.x),
+              y: Math.min(drag.start.y, drag.cur.y),
+              w: Math.abs(drag.cur.x - drag.start.x),
+              h: Math.abs(drag.cur.y - drag.start.y),
+              angle: 0,
+            }
+          : state.modelRoi;
       drawRoi(roi);
       updateReadout();
     };
@@ -250,7 +359,7 @@
         mode: "resize",
         handle,
         start: p,
-        roi0: { ...state.modelRoi },
+        roi0: { ...state.modelRoi, angle: angleOf(state.modelRoi) },
       };
       return;
     }
@@ -301,6 +410,7 @@
           y: Math.min(a.y, b.y),
           w,
           h,
+          angle: readAngleInput() || 0,
         };
       }
     }
@@ -322,7 +432,6 @@
     paint();
   }
 
-  // Own the global draw hook so app.js does not fight this editor.
   window.SVisionShapeModel = {
     ownsCanvas: true,
     draw: paint,
@@ -341,9 +450,10 @@
       const src = saved
         ? `/api/projects/${state.project.id}/tools/${tool.id}/shape-model?t=${encodeURIComponent(model.registered_at || "")}`
         : "";
+      const ang = state.modelRoi ? angleOf(state.modelRoi) : 0;
       const hint = live
-        ? "Grab a still, zoom with the wheel, draw a box, then drag edges or corners to fine-tune before Register."
-        : "Choose an image, zoom with the wheel (Shift-drag to pan), draw a box, then drag edges/corners to fine-tune.";
+        ? "Grab a still, draw a box, drag the orange handle (or set Angle) to rotate, then fine-tune edges before Register."
+        : "Choose an image, draw a box, rotate with the orange handle (or Angle), then fine-tune edges/corners.";
       return `
         <p class="hint">${hint}</p>
         <div class="sample-actions model-toolbar">
@@ -355,6 +465,11 @@
           <button id="modelZoomOut" type="button" title="Zoom out">−</button>
           <button id="modelZoomReset" type="button" title="Reset view">1:1</button>
           <button id="modelClearRoi" type="button">Clear box</button>
+        </div>
+        <div class="roi-row model-angle-row">
+          <span>Angle</span>
+          <input id="modelBoxAngle" type="number" min="-180" max="180" step="0.5" value="${ang}" />
+          <span class="hint">degrees · drag the orange handle to rotate</span>
         </div>
         <p id="grabModelStatus" class="hint">${live ? "Camera is live — Grab captures a still for the model." : ""}</p>
         <p id="modelRoiReadout" class="hint model-roi-readout">No selection</p>
@@ -368,12 +483,20 @@
       const zout = document.getElementById("modelZoomOut");
       const zreset = document.getElementById("modelZoomReset");
       const clear = document.getElementById("modelClearRoi");
+      const ang = document.getElementById("modelBoxAngle");
       if (zin) zin.onclick = () => setZoom(view.zoom * 1.25);
       if (zout) zout.onclick = () => setZoom(view.zoom / 1.25);
       if (zreset) zreset.onclick = () => resetView();
       if (clear) {
         clear.onclick = () => {
           state.modelRoi = null;
+          paint();
+        };
+      }
+      if (ang) {
+        ang.oninput = () => {
+          if (!state.modelRoi) return;
+          state.modelRoi = { ...state.modelRoi, angle: Number(ang.value) || 0 };
           paint();
         };
       }

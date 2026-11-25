@@ -1789,6 +1789,7 @@ async function registerShapeModel() {
   body.append("y", state.modelRoi.y);
   body.append("w", state.modelRoi.w);
   body.append("h", state.modelRoi.h);
+  body.append("angle", state.modelRoi.angle || 0);
   await api(`/api/projects/${state.project.id}/tools/${tool.id}/shape-model`, { method: "POST", body });
   state.settingTab = "panel:shape_model";
   await refreshSelectedTool();
