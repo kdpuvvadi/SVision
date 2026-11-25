@@ -143,6 +143,9 @@ async function loadProjects(selectId) {
 async function openProject(id) {
   state.project = await api(`/api/projects/${id}`);
   if (!state.project.flow) state.project.flow = { logic: "all", tools: [] };
+  for (const tool of tools()) {
+    if (tool.type === "camera" && tool.config?.source === "gige") tool.config.source = "gentl";
+  }
   if (!tools().some((t) => t.id === state.selectedId)) state.selectedId = tools()[0]?.id || null;
   renderFlow();
   renderCatalog();
@@ -270,6 +273,63 @@ function renderOptionsInto(panel) {
   drawToolOutputRegion(tool);
 }
 
+async function browseCtiFiles() {
+  const picker = $("ctiPicker");
+  if (!picker) return;
+  picker.hidden = false;
+  picker.innerHTML = `<p class="hint">Searching this PC for .cti producers…</p>`;
+  try {
+    const data = await api("/api/cameras/cti");
+    const files = data.files || [];
+    if (!files.length) {
+      picker.innerHTML = `<p class="hint">No .cti files found in the usual GenTL folders. Paste the full path above.</p>`;
+      return;
+    }
+    picker.innerHTML = files.map((file) =>
+      `<button type="button" class="cti-choice" data-cti-path="${escapeHtml(file.path)}">
+        <strong>${escapeHtml(file.name)}</strong>
+        <span>${escapeHtml(file.path)}</span>
+      </button>`
+    ).join("");
+  } catch (err) {
+    picker.innerHTML = `<p class="hint">${escapeHtml(err.message)}</p>`;
+  }
+}
+
+async function scanGentlDevices() {
+  const tool = selectedTool();
+  if (!tool) return;
+  readOptionsIntoTool();
+  const cti = (tool.config?.cti_path || "").trim();
+  const picker = $("devicePicker");
+  if (!picker) return;
+  if (!cti) {
+    picker.hidden = false;
+    picker.innerHTML = `<p class="hint">Choose a CTI producer file first.</p>`;
+    return;
+  }
+  picker.hidden = false;
+  picker.innerHTML = `<p class="hint">Scanning GenTL devices…</p>`;
+  try {
+    const data = await api(`/api/cameras/devices?cti_path=${encodeURIComponent(cti)}`);
+    const devices = data.devices || [];
+    if (!devices.length) {
+      picker.innerHTML = `<p class="hint">No cameras found for this CTI. Check the network / IP config tool.</p>`;
+      return;
+    }
+    picker.innerHTML = devices.map((dev) => {
+      const label = dev.display_name || dev.id || dev.serial || "Camera";
+      const meta = [dev.vendor, dev.model, dev.serial, dev.tl_type].filter(Boolean).join(" · ");
+      return `<button type="button" class="cti-choice" data-device-id="${escapeHtml(dev.id || "")}">
+        <strong>${escapeHtml(label)}</strong>
+        <span>${escapeHtml(meta || dev.id || "")}</span>
+      </button>`;
+    }).join("");
+  } catch (err) {
+    picker.innerHTML = `<p class="hint">${escapeHtml(err.message)}</p>`;
+  }
+}
+
 function toolRegion(tool) {
   const cfg = tool?.config || {};
   const roi = cfg.roi || cfg.search_roi;
@@ -316,9 +376,31 @@ function fieldHtml(tool, field) {
   if (field.kind === "text") {
     return `<label>${escapeHtml(field.label)}<input data-key="${field.key}" type="text" value="${escapeHtml(value || "")}" placeholder="${escapeHtml(field.placeholder || "")}" /></label>`;
   }
+  if (field.kind === "cti") {
+    return `<label>${escapeHtml(field.label)}
+      <div class="path-row">
+        <input data-key="${field.key}" type="text" value="${escapeHtml(value || "")}" placeholder="${escapeHtml(field.placeholder || "")}" />
+        <button type="button" data-browse-cti>Find CTI…</button>
+      </div>
+      <span class="hint">GenTL producer (.cti) on this IPC. Required for GigE / GenTL cameras.</span>
+      <div id="ctiPicker" class="cti-picker" hidden></div>
+    </label>`;
+  }
+  if (field.kind === "gentl_device") {
+    const label = value || "";
+    return `<label>${escapeHtml(field.label)}
+      <div class="path-row">
+        <input data-key="${field.key}" type="text" value="${escapeHtml(label)}" placeholder="${escapeHtml(field.placeholder || "")}" />
+        <button type="button" data-scan-devices>Scan</button>
+      </div>
+      <span class="hint">Pick a device id after scanning with the CTI producer above.</span>
+      <div id="devicePicker" class="cti-picker" hidden></div>
+    </label>`;
+  }
   if (field.kind === "select") {
+    const selected = (opt) => value === opt.value || (field.key === "source" && value === "gige" && opt.value === "gentl");
     const options = (field.options || []).map((opt) =>
-      `<option value="${escapeHtml(opt.value)}" ${value === opt.value ? "selected" : ""}>${escapeHtml(opt.label)}</option>`
+      `<option value="${escapeHtml(opt.value)}" ${selected(opt) ? "selected" : ""}>${escapeHtml(opt.label)}</option>`
     ).join("");
     return `<label>${escapeHtml(field.label)}<select data-key="${field.key}">${options}</select></label>`;
   }
@@ -426,11 +508,14 @@ function updateImageInput() {
   } else if ((camera.config?.source || "upload") === "usb") {
     $("emptyTitle").textContent = "USB camera";
     $("emptyDetail").textContent = `Live grab from USB index ${camera.config?.usb_index || 0}. Measure runs on the worker thread.`;
-  } else if ((camera.config?.source || "upload") === "gige") {
-    $("emptyTitle").textContent = "GigE camera";
-    $("emptyDetail").textContent = camera.config?.gige_ip
-      ? `Live grab from ${camera.config.gige_ip}. Measure runs on the worker thread.`
-      : "Set the GigE IP on the Camera tool.";
+  } else if (["gige", "gentl"].includes(camera.config?.source || "")) {
+    $("emptyTitle").textContent = "GigE / GenTL camera";
+    const who = camera.config?.device_id || camera.config?.gige_ip || "";
+    $("emptyDetail").textContent = who
+      ? `Live grab from ${who}. Measure runs on the worker thread.`
+      : camera.config?.cti_path
+        ? "Scan and select a camera on the Camera tool."
+        : "Choose a CTI producer file on the Camera tool, then scan for cameras.";
   } else {
     $("emptyTitle").textContent = "Drop images here";
     $("emptyDetail").textContent = "Or choose files. This Camera tool uses uploaded images.";
@@ -809,6 +894,40 @@ function bind() {
     }
   });
   $("sceneSettings").addEventListener("click", async (e) => {
+    if (e.target.closest("[data-browse-cti]")) {
+      await browseCtiFiles();
+      return;
+    }
+    if (e.target.closest("[data-scan-devices]")) {
+      await scanGentlDevices();
+      return;
+    }
+    const ctiBtn = e.target.closest("[data-cti-path]");
+    if (ctiBtn) {
+      const tool = selectedTool();
+      if (tool) {
+        tool.config = tool.config || {};
+        tool.config.cti_path = ctiBtn.dataset.ctiPath || "";
+        state.settingTab = "cti_path";
+        await saveFlow();
+        renderSceneSettings();
+      }
+      return;
+    }
+    const deviceBtn = e.target.closest("[data-device-id]");
+    if (deviceBtn) {
+      const tool = selectedTool();
+      if (tool) {
+        tool.config = tool.config || {};
+        tool.config.device_id = deviceBtn.dataset.deviceId || "";
+        tool.config.source = "gentl";
+        state.settingTab = "device_id";
+        await saveFlow();
+        renderSceneSettings();
+        updateImageInput();
+      }
+      return;
+    }
     if (e.target.id === "clearRoi") {
       const tool = selectedTool();
       const key = e.target.dataset.roiKey || "roi";
@@ -1041,6 +1160,40 @@ function bind() {
     saveFlow().catch((err) => alert(err.message));
   });
   $("toolPanel").addEventListener("click", async (e) => {
+    if (e.target.closest("[data-browse-cti]")) {
+      await browseCtiFiles();
+      return;
+    }
+    if (e.target.closest("[data-scan-devices]")) {
+      await scanGentlDevices();
+      return;
+    }
+    const ctiBtn = e.target.closest("[data-cti-path]");
+    if (ctiBtn) {
+      const tool = selectedTool();
+      if (tool) {
+        tool.config = tool.config || {};
+        tool.config.cti_path = ctiBtn.dataset.ctiPath || "";
+        state.settingTab = "cti_path";
+        await saveFlow();
+        renderOptions();
+      }
+      return;
+    }
+    const deviceBtn = e.target.closest("[data-device-id]");
+    if (deviceBtn) {
+      const tool = selectedTool();
+      if (tool) {
+        tool.config = tool.config || {};
+        tool.config.device_id = deviceBtn.dataset.deviceId || "";
+        tool.config.source = "gentl";
+        state.settingTab = "device_id";
+        await saveFlow();
+        renderOptions();
+        updateImageInput();
+      }
+      return;
+    }
     if (e.target.id === "clearRoi") {
       const tool = selectedTool();
       const key = e.target.dataset.roiKey || "roi";

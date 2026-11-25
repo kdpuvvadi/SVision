@@ -2,7 +2,7 @@
 
 Windows IPC inspection software for OK / NG decisions from sample images, plus OCR and code reading.
 
-The UI is a web page served by the IPC. Open it from this PC or from another PC on the same network to configure recipes and run checks. Images are uploaded for now. A GigE / GenICam camera can be added later without changing the inspection flow.
+The UI is a web page served by the IPC. Open it from this PC or from another PC on the same network to configure recipes and run checks. Image input is a pluggable Camera tool: upload files, a USB device, or a GigE GenTL camera via a vendor `.cti` producer.
 
 ## What it does
 

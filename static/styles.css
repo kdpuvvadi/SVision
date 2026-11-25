@@ -386,6 +386,28 @@ main { height: calc(100% - 54px); }
 .opt h2 { margin: 0; }
 .opt label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); }
 .opt-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.path-row { display: flex; gap: 8px; align-items: stretch; }
+.path-row input { flex: 1; min-width: 0; }
+.path-row button { white-space: nowrap; }
+.cti-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  max-height: 220px;
+  overflow: auto;
+}
+.cti-choice {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  text-align: left;
+  width: 100%;
+  background: var(--panel-2);
+}
+.cti-choice strong { color: var(--text); font-weight: 600; }
+.cti-choice span { color: var(--muted); font-size: 12px; word-break: break-all; }
 .sample-head, .save-row { display: flex; justify-content: space-between; gap: 16px; align-items: center; }
 .sample-actions, .save-row { display: flex; gap: 8px; align-items: center; }
 .model-status {

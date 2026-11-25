@@ -28,7 +28,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from app.config import DATA_DIR, HOST, MAX_UPLOAD_MB, PORT, ROOT, THREAD_COUNT, app_version, ensure_dirs, lan_addresses
-from app.core.camera import ImageSource, camera_from_project
+from app.core.camera import ImageSource, camera_from_project, camera_session
+from app.core.cameras.gentl import discover_cti_files, list_gentl_devices
 from app.core.handshake import handshake
 from app.core.plc_runtime import plc_runtime
 from app.core.robot_stream import robot_stream
@@ -49,6 +50,7 @@ async def lifespan(_app: FastAPI):
     finally:
         robot_stream.stop_all()
         plc_runtime.stop()
+        camera_session.close()
 
 
 app = FastAPI(title="SVision", version="1.0.0", lifespan=lifespan)
@@ -186,6 +188,25 @@ def plc_trigger(project_id: str | None = None) -> dict:
 @app.get("/api/tools")
 def list_tools() -> list[dict]:
     return catalog()
+
+
+@app.get("/api/cameras/cti")
+def list_camera_cti() -> dict:
+    files = discover_cti_files()
+    return {"files": files, "count": len(files)}
+
+
+@app.get("/api/cameras/devices")
+def list_camera_devices(cti_path: str = "") -> dict:
+    try:
+        devices = list_gentl_devices(cti_path)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"devices": devices, "count": len(devices), "cti_path": cti_path}
 
 
 @app.get("/api/projects")

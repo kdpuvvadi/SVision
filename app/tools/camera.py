@@ -27,7 +27,7 @@ from app.tools.base import Tool
 class CameraTool(Tool):
     type = "camera"
     title = "Camera"
-    summary = "Image source for this flow. Upload a file, or use a GigE camera later."
+    summary = "Image source for this flow. Upload, USB, or GigE GenTL (.cti) cameras."
     singleton = True
 
     def fields(self) -> list[dict]:
@@ -39,7 +39,7 @@ class CameraTool(Tool):
                 "options": [
                     {"value": "upload", "label": "Upload image"},
                     {"value": "usb", "label": "USB camera"},
-                    {"value": "gige", "label": "GigE camera"},
+                    {"value": "gentl", "label": "GigE / GenTL"},
                 ],
             },
             {
@@ -49,18 +49,36 @@ class CameraTool(Tool):
                 "placeholder": "0",
             },
             {
+                "key": "cti_path",
+                "label": "CTI producer",
+                "kind": "cti",
+                "placeholder": r"C:\Program Files\Common Files\OMRON_SENTECH\GenTL\v1_5\StGenTL_MD_VC141_v1_5.cti",
+            },
+            {
+                "key": "device_id",
+                "label": "Camera",
+                "kind": "gentl_device",
+                "placeholder": "Scan after choosing a CTI file",
+            },
+            {
                 "key": "gige_ip",
-                "label": "GigE IP",
+                "label": "IP note",
                 "kind": "text",
-                "placeholder": "192.168.0.10",
+                "placeholder": "192.168.250.4 (optional note)",
             },
         ]
 
     def default_config(self) -> dict:
-        return {"source": "upload", "usb_index": "0", "gige_ip": ""}
+        return {
+            "source": "upload",
+            "usb_index": "0",
+            "cti_path": "",
+            "device_id": "",
+            "gige_ip": "",
+        }
 
     def status(self) -> str:
-        return "Upload for offline checks. USB / GigE for live PLC measure."
+        return "Upload for offline checks. USB or GigE GenTL for live PLC measure."
 
     def catalog(self) -> dict:
         data = super().catalog()
@@ -72,14 +90,14 @@ class CameraTool(Tool):
         started = time.perf_counter()
         cfg = tool.get("config") or {}
         source = cfg.get("source") or "upload"
-        if source == "gige" and (image is None or image.size == 0):
-            ip = (cfg.get("gige_ip") or "").strip() or "no IP"
+        if source in {"gige", "gentl"} and (image is None or image.size == 0):
+            label = (cfg.get("device_id") or cfg.get("gige_ip") or "no device").strip()
             return {
                 "id": tool.get("id"),
                 "type": self.type,
                 "name": tool.get("name") or self.title,
                 "judgment": "NG",
-                "message": f"GigE camera {ip} produced no frame.",
+                "message": f"GenTL camera {label} produced no frame.",
                 "source": source,
                 "elapsed_ms": (time.perf_counter() - started) * 1000.0,
             }, None
@@ -104,7 +122,12 @@ class CameraTool(Tool):
                 "elapsed_ms": (time.perf_counter() - started) * 1000.0,
             }, None
         h, w = image.shape[:2]
-        label = "Upload" if source == "upload" else source.upper()
+        if source in {"gige", "gentl"}:
+            label = "GenTL"
+        elif source == "usb":
+            label = "USB"
+        else:
+            label = "Upload"
         return {
             "id": tool.get("id"),
             "type": self.type,
