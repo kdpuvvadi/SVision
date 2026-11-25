@@ -522,12 +522,19 @@ class ProjectStore:
         folder.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(folder / "shape_model.png"), crop)
         state = self._load_state(project_id, tool_id)
+        ih, iw = image.shape[:2]
+        large = bool(crop.shape[0] * crop.shape[1] > 0.55 * ih * iw)
         state["shape_model"] = {
             "saved": True,
             "width": int(crop.shape[1]),
             "height": int(crop.shape[0]),
             "angle": round(angle, 2),
             "registered_at": _now(),
+            "warning": (
+                "Selection covers most of the image. Draw tighter around the part so the overlay hugs it."
+                if large
+                else ""
+            ),
         }
         self._save_state(project_id, tool_id, state)
         return state["shape_model"]

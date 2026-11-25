@@ -27,6 +27,10 @@ from app.core.features import _roi_box
 from app.tools.base import Tool
 from app.tools.registry import register
 
+_model_cache: dict[str, tuple[float, np.ndarray]] = {}
+_SIFT_MAX_EDGE = 960
+_TEMPLATE_MAX_EDGE = 480
+
 
 def _gray(image: np.ndarray) -> np.ndarray:
     if image.ndim == 2:
@@ -34,48 +38,13 @@ def _gray(image: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
 
-_MAX_EDGE = 320
-_model_cache: dict[str, tuple[float, np.ndarray]] = {}
-
-
-def _edges(gray: np.ndarray) -> np.ndarray:
-    blur = cv2.GaussianBlur(gray, (3, 3), 0)
-    return cv2.Canny(blur, 40, 120)
-
-
-def _rotate(gray: np.ndarray, angle: float) -> tuple[np.ndarray, np.ndarray]:
-    """Rotate template; return (image, 2x3 matrix mapping src → dst pixels)."""
-    h, w = gray.shape[:2]
-    if abs(angle) < 0.05:
-        matrix = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float64)
-        return gray, matrix
-    matrix = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), float(angle), 1.0)
-    cos = abs(matrix[0, 0])
-    sin = abs(matrix[0, 1])
-    nw = int(h * sin + w * cos)
-    nh = int(h * cos + w * sin)
-    matrix[0, 2] += (nw - w) / 2.0
-    matrix[1, 2] += (nh - h) / 2.0
-    out = cv2.warpAffine(gray, matrix, (nw, nh), flags=cv2.INTER_LINEAR, borderValue=0)
-    return out, matrix
-
-
-def _warp_rect_corners(mw: int, mh: int, matrix: np.ndarray) -> np.ndarray:
-    """Map the model rectangle corners through the same matrix used to build the template."""
-    corners = np.array([[0.0, 0.0], [mw, 0.0], [mw, mh], [0.0, mh]], dtype=np.float64)
-    ones = np.ones((4, 1), dtype=np.float64)
-    return (matrix @ np.hstack([corners, ones]).T).T
-
-
 def _trim_model(gray: np.ndarray, pad: int = 2) -> np.ndarray:
-    """Drop empty border so the overlay hugs the pattern, not padded canvas."""
+    """Drop flat border so matching focuses on the pattern."""
     if gray.size == 0:
         return gray
-    # Content = pixels that differ from the dominant border color.
     border = np.concatenate(
         [gray[0, :].ravel(), gray[-1, :].ravel(), gray[:, 0].ravel(), gray[:, -1].ravel()]
     )
-    # Mode via median is stable for flat borders.
     bg = float(np.median(border))
     mask = np.abs(gray.astype(np.float32) - bg) > 12.0
     if not np.any(mask):
@@ -90,17 +59,34 @@ def _trim_model(gray: np.ndarray, pad: int = 2) -> np.ndarray:
     return gray[y0:y1, x0:x1]
 
 
-def _small(image: np.ndarray, max_edge: int = _MAX_EDGE) -> tuple[np.ndarray, float, float]:
-    """Downscale uniformly; return image and actual per-axis scales (out/src)."""
-    h, w = image.shape[:2]
+def _downscale(gray: np.ndarray, max_edge: int) -> tuple[np.ndarray, float]:
+    h, w = gray.shape[:2]
     long_edge = max(h, w)
     if long_edge <= max_edge:
-        return image, 1.0, 1.0
-    scale = max_edge / long_edge
-    nw = max(1, int(round(w * scale)))
-    nh = max(1, int(round(h * scale)))
-    out = cv2.resize(image, (nw, nh), interpolation=cv2.INTER_LINEAR)
-    return out, nw / float(w), nh / float(h)
+        return gray, 1.0
+    scale = max_edge / float(long_edge)
+    out = cv2.resize(
+        gray,
+        (max(1, int(round(w * scale))), max(1, int(round(h * scale)))),
+        interpolation=cv2.INTER_AREA,
+    )
+    return out, scale
+
+
+def _rotate_template(gray: np.ndarray, angle: float) -> tuple[np.ndarray, np.ndarray]:
+    h, w = gray.shape[:2]
+    if abs(angle) < 0.05:
+        matrix = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float64)
+        return gray, matrix
+    matrix = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), float(angle), 1.0)
+    cos = abs(matrix[0, 0])
+    sin = abs(matrix[0, 1])
+    nw = int(h * sin + w * cos)
+    nh = int(h * cos + w * sin)
+    matrix[0, 2] += (nw - w) / 2.0
+    matrix[1, 2] += (nh - h) / 2.0
+    out = cv2.warpAffine(gray, matrix, (nw, nh), flags=cv2.INTER_LINEAR, borderValue=0)
+    return out, matrix
 
 
 def _angle_list(span: int, step: float) -> list[float]:
@@ -121,7 +107,12 @@ def _angle_list(span: int, step: float) -> list[float]:
     return out
 
 
-def _match_template(search: np.ndarray, templ: np.ndarray, opencl: bool) -> tuple[float, int, int]:
+def _edges(gray: np.ndarray) -> np.ndarray:
+    blur = cv2.GaussianBlur(gray, (3, 3), 0)
+    return cv2.Canny(blur, 40, 120)
+
+
+def _match_template_once(search: np.ndarray, templ: np.ndarray, opencl: bool) -> tuple[float, int, int]:
     if templ.shape[0] >= search.shape[0] or templ.shape[1] >= search.shape[1]:
         return -1.0, 0, 0
     if opencl:
@@ -137,18 +128,161 @@ def _match_template(search: np.ndarray, templ: np.ndarray, opencl: bool) -> tupl
     return float(value), int(loc[0]), int(loc[1])
 
 
-def _map_points_to_full(pts_small: np.ndarray, x0: int, y0: int, sx: float, sy: float) -> np.ndarray:
-    """Map search-space points to full-image pixels using actual resize scales."""
-    out = np.empty_like(pts_small)
-    out[:, 0] = x0 + pts_small[:, 0] / sx
-    out[:, 1] = y0 + pts_small[:, 1] / sy
-    return out
+def _affine_angle_deg(aff: np.ndarray) -> float:
+    # estimateAffinePartial2D / getRotationMatrix2D use [[c, s], [-s, c]] (scale absorbed in c,s).
+    return float(np.degrees(np.arctan2(float(aff[0, 1]), float(aff[0, 0]))))
+
+
+def _affine_scale(aff: np.ndarray) -> float:
+    return float(np.hypot(aff[0, 0], aff[1, 0]))
+
+
+def _transform_corners(aff: np.ndarray, width: float, height: float) -> np.ndarray:
+    corners = np.array(
+        [[0.0, 0.0], [width, 0.0], [width, height], [0.0, height]],
+        dtype=np.float64,
+    ).reshape(-1, 1, 2)
+    return cv2.transform(corners, aff).reshape(-1, 2)
+
+
+def _match_features(search: np.ndarray, model: np.ndarray) -> dict | None:
+    """SIFT + similarity affine. Handles large models, rotation, and modest scale change."""
+    search_s, s_scale = _downscale(search, _SIFT_MAX_EDGE)
+    model_s, m_scale = _downscale(model, _SIFT_MAX_EDGE)
+    detector = cv2.SIFT_create(nfeatures=1800, contrastThreshold=0.04, edgeThreshold=12)
+    kp_m, des_m = detector.detectAndCompute(model_s, None)
+    kp_s, des_s = detector.detectAndCompute(search_s, None)
+    if des_m is None or des_s is None or len(kp_m) < 8 or len(kp_s) < 8:
+        return None
+    matcher = cv2.BFMatcher(cv2.NORM_L2)
+    try:
+        pairs = matcher.knnMatch(des_m, des_s, k=2)
+    except cv2.error:
+        return None
+    good = []
+    for pair in pairs:
+        if len(pair) < 2:
+            continue
+        m, n = pair
+        if m.distance < 0.75 * n.distance:
+            good.append(m)
+    if len(good) < 8:
+        return None
+    src = np.float32([kp_m[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
+    dst = np.float32([kp_s[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
+    aff_s, inlier_mask = cv2.estimateAffinePartial2D(
+        src,
+        dst,
+        method=cv2.RANSAC,
+        ransacReprojThreshold=4.0,
+        maxIters=3000,
+        confidence=0.995,
+    )
+    if aff_s is None or inlier_mask is None:
+        return None
+    inliers = int(inlier_mask.ravel().sum())
+    if inliers < 8:
+        return None
+    # Map affine from downscaled model/search back to full-resolution pixels.
+    # x_s = s_scale * x_full_search, x_m = m_scale * x_full_model
+    # x_s = A_s * x_m + t_s  =>  s*x = A_s * (m*X) + t_s  =>  x = (A_s*m/s) X + t_s/s
+    scale_ratio = m_scale / s_scale
+    aff = aff_s.astype(np.float64).copy()
+    aff[:, :2] *= scale_ratio
+    aff[:, 2] /= s_scale
+
+    mh, mw = model.shape[:2]
+    box = _transform_corners(aff, float(mw), float(mh))
+    conf = float(inliers) / float(len(good))
+    # Blend with match density so sparse luck doesn't look like a solid hit.
+    conf = min(1.0, conf * min(1.0, inliers / 40.0) * 0.35 + conf * 0.65)
+    tip_src = np.array([[[mw / 2.0, 0.0]]], dtype=np.float64)
+    tip_dst = cv2.transform(tip_src, aff).reshape(2)
+    center = box.mean(axis=0)
+    return {
+        "confidence": conf,
+        "x": float(center[0]),
+        "y": float(center[1]),
+        "width": float(mw) * _affine_scale(aff),
+        "height": float(mh) * _affine_scale(aff),
+        "angle": _affine_angle_deg(aff),
+        "box": box.tolist(),
+        "tip": [center.tolist(), tip_dst.tolist()],
+        "method": "sift",
+        "inliers": inliers,
+        "matches": len(good),
+    }
+
+
+def _match_template_pyramid(
+    search: np.ndarray,
+    model: np.ndarray,
+    angles: list[float],
+    opencl: bool,
+) -> dict | None:
+    """Fallback for small / low-texture models where SIFT has too few keypoints."""
+    search_s, s_scale = _downscale(search, _TEMPLATE_MAX_EDGE)
+    target_w = max(8, int(round(model.shape[1] * s_scale)))
+    target_h = max(8, int(round(model.shape[0] * s_scale)))
+    model_s = cv2.resize(model, (target_w, target_h), interpolation=cv2.INTER_AREA)
+    if model_s.shape[0] >= search_s.shape[0] or model_s.shape[1] >= search_s.shape[1]:
+        fit = 0.55 * min(search_s.shape[0] / model_s.shape[0], search_s.shape[1] / model_s.shape[1])
+        model_s = cv2.resize(
+            model_s,
+            (max(8, int(model_s.shape[1] * fit)), max(8, int(model_s.shape[0] * fit))),
+            interpolation=cv2.INTER_AREA,
+        )
+
+    search_e = _edges(search_s)
+    scales = [0.90, 0.95, 1.0, 1.05, 1.10]
+    best = None
+    mh0, mw0 = model_s.shape[:2]
+    for scale in scales:
+        mw = max(8, int(round(mw0 * scale)))
+        mh = max(8, int(round(mh0 * scale)))
+        scaled = cv2.resize(model_s, (mw, mh), interpolation=cv2.INTER_LINEAR)
+        for angle in angles:
+            templ, matrix = _rotate_template(scaled, angle)
+            if templ.shape[0] >= search_s.shape[0] or templ.shape[1] >= search_s.shape[1]:
+                continue
+            score_g, px, py = _match_template_once(search_s, templ, opencl)
+            score_e, px_e, py_e = _match_template_once(search_e, _edges(templ), opencl)
+            score = max(0.0, float(score_g))
+            if score_e > score and abs(px_e - px) <= 2 and abs(py_e - py) <= 2:
+                score = float(score_e)
+                px, py = px_e, py_e
+            if best is not None and score <= best["confidence"]:
+                continue
+            corners = np.array([[0.0, 0.0], [mw, 0.0], [mw, mh], [0.0, mh]], dtype=np.float64)
+            ones = np.ones((4, 1), dtype=np.float64)
+            pts = (matrix @ np.hstack([corners, ones]).T).T
+            pts[:, 0] += px
+            pts[:, 1] += py
+            # Up to full search pixels
+            pts /= s_scale
+            tip_local = np.array([[mw / 2.0, 0.0]], dtype=np.float64)
+            tip = (matrix @ np.hstack([tip_local, np.ones((1, 1))]).T).T[0]
+            tip[0] = (tip[0] + px) / s_scale
+            tip[1] = (tip[1] + py) / s_scale
+            center = pts.mean(axis=0)
+            best = {
+                "confidence": score,
+                "x": float(center[0]),
+                "y": float(center[1]),
+                "width": float(mw) / s_scale,
+                "height": float(mh) / s_scale,
+                "angle": float(angle),
+                "box": pts.tolist(),
+                "tip": [center.tolist(), tip.tolist()],
+                "method": "template",
+            }
+    return best
 
 
 class ShapeSearchTool(Tool):
     type = "shape_search"
     title = "Shape Search"
-    summary = "Register any pattern by drawing it on the image, then search for that model."
+    summary = "Register a pattern, then find its pose (position, angle, scale) in the image."
     ui_modules = ["/static/tools/accel.js", "/static/tools/shape_search.js"]
 
     def fields(self) -> list[dict]:
@@ -158,13 +292,13 @@ class ShapeSearchTool(Tool):
                 "key": "min_confidence",
                 "label": "Minimum confidence",
                 "kind": "range",
-                "min": 0.4,
+                "min": 0.35,
                 "max": 0.95,
                 "step": 0.01,
             },
             {
                 "key": "angle_range",
-                "label": "Angle search",
+                "label": "Template angle fallback",
                 "kind": "select",
                 "options": [
                     {"value": "0", "label": "No rotation"},
@@ -176,7 +310,7 @@ class ShapeSearchTool(Tool):
             },
             {
                 "key": "angle_step",
-                "label": "Angle step",
+                "label": "Template angle step",
                 "kind": "select",
                 "options": [
                     {"value": "5", "label": "5° (faster)"},
@@ -200,7 +334,7 @@ class ShapeSearchTool(Tool):
     def default_config(self) -> dict:
         return {
             "search_roi": None,
-            "min_confidence": 0.6,
+            "min_confidence": 0.55,
             "angle_range": "20",
             "angle_step": "2",
             "accel_device": "cpu",
@@ -208,8 +342,8 @@ class ShapeSearchTool(Tool):
 
     def status(self) -> str:
         return (
-            "Open Model. If Camera is USB/GenTL, Grab from camera; otherwise choose an image. "
-            "Draw around the pattern (drag edges/corners to fine-tune), then Register."
+            "Open Model, grab/choose an image, draw tightly around the part, Register. "
+            "Search uses feature matching (rotation-aware); template match is the fallback."
         )
 
     def mount(self, app) -> None:
@@ -221,7 +355,7 @@ class ShapeSearchTool(Tool):
         started = time.perf_counter()
         cfg = tool.get("config") or {}
         name = tool.get("name") or self.title
-        min_confidence = float(cfg.get("min_confidence", 0.6))
+        min_confidence = float(cfg.get("min_confidence", 0.55))
         accel = resolve_accel(cfg.get("accel_device") or "cpu")
         opencl = use_opencl(cfg.get("accel_device"))
         model = self._load_model(project_id, tool.get("id", ""))
@@ -239,69 +373,24 @@ class ShapeSearchTool(Tool):
             }, image
 
         x0, y0, x1, y1 = _roi_box(image, cfg.get("search_roi"))
-        roi = image[y0:y1, x0:x1]
-        small, sx, sy = _small(roi)
-        gray_search = _gray(small)
-        # Trim empty border, then resize with the SAME sx/sy as the search image
-        # so overlay corners map back to full-resolution without scale drift.
-        gray_model = _trim_model(_gray(model) if model.ndim == 3 else model)
-        mw0, mh0 = int(gray_model.shape[1]), int(gray_model.shape[0])
-        mw = max(1, int(round(mw0 * sx)))
-        mh = max(1, int(round(mh0 * sy)))
-        gray_model = cv2.resize(gray_model, (mw, mh), interpolation=cv2.INTER_AREA if (mw < mw0 or mh < mh0) else cv2.INTER_LINEAR)
-        sh, sw = gray_search.shape[:2]
-        if mh >= sh or mw >= sw:
-            gray_model = cv2.resize(gray_model, (max(1, sw // 2), max(1, sh // 2)), interpolation=cv2.INTER_LINEAR)
-            mh, mw = gray_model.shape[:2]
+        search = _gray(image[y0:y1, x0:x1])
+        model_gray = _trim_model(_gray(model))
+        if min(model_gray.shape[:2]) < 8:
+            model_gray = _gray(model)
 
-        search_edges = _edges(gray_search)
         span = int(cfg.get("angle_range") or 0)
         step = float(cfg.get("angle_step") or 2)
         angles = _angle_list(span, step)
 
-        best = None
-        for angle in angles:
-            templ_gray, matrix = _rotate(gray_model, angle)
-            if templ_gray.shape[0] >= gray_search.shape[0] or templ_gray.shape[1] >= gray_search.shape[1]:
-                continue
-            # Localize with gray (stable). Edges only refine confidence when they agree.
-            score_g, px, py = _match_template(gray_search, templ_gray, opencl)
-            score_e, px_e, py_e = _match_template(search_edges, _edges(templ_gray), opencl)
-            score = max(0.0, float(score_g))
-            if score_e > score_g and abs(px_e - px) <= 3 and abs(py_e - py) <= 3:
-                score = max(score, float(score_e))
-            if best is not None and score <= best["confidence"]:
-                continue
-            # Corners = model rectangle warped by the SAME matrix as the matched template,
-            # then shifted to the match location — locks the outline to the part.
-            pts_s = _warp_rect_corners(mw, mh, matrix)
-            pts_s[:, 0] += px
-            pts_s[:, 1] += py
-            pts = _map_points_to_full(pts_s, x0, y0, sx, sy)
-            center_s = np.array([[mw / 2.0, mh / 2.0]], dtype=np.float64)
-            ones = np.ones((1, 1), dtype=np.float64)
-            center_t = (matrix @ np.hstack([center_s, ones]).T).T[0]
-            tip_local = np.array([[mw / 2.0, mh / 2.0 - mh * 0.55]], dtype=np.float64)
-            tip_t = (matrix @ np.hstack([tip_local, ones]).T).T[0]
-            tip_s = np.vstack([center_t, tip_t])
-            tip_s[:, 0] += px
-            tip_s[:, 1] += py
-            tip = _map_points_to_full(tip_s, x0, y0, sx, sy)
-            best = {
-                "confidence": score,
-                "x": float(pts[:, 0].mean()),
-                "y": float(pts[:, 1].mean()),
-                "width": float(mw) / sx,
-                "height": float(mh) / sy,
-                "angle": float(angle),
-                "box": pts.tolist(),
-                "tip": tip.tolist(),
-            }
+        best = _match_features(search, model_gray)
+        # Prefer template only when features are weak / unavailable.
+        if best is None or best["confidence"] < 0.45:
+            templ = _match_template_pyramid(search, model_gray, angles, opencl)
+            if templ is not None and (best is None or templ["confidence"] > best["confidence"]):
+                best = templ
 
         elapsed = (time.perf_counter() - started) * 1000.0
-        found = best is not None and best["confidence"] > 0
-
-        if not found:
+        if best is None or best["confidence"] <= 0:
             return {
                 "id": tool.get("id"),
                 "type": self.type,
@@ -314,6 +403,21 @@ class ShapeSearchTool(Tool):
                 "elapsed_ms": elapsed,
             }, None
 
+        # Offset ROI origin into full-image coordinates.
+        box = np.asarray(best["box"], dtype=np.float64)
+        box[:, 0] += x0
+        box[:, 1] += y0
+        tip = np.asarray(best["tip"], dtype=np.float64)
+        tip[:, 0] += x0
+        tip[:, 1] += y0
+        best = {
+            **best,
+            "x": float(box[:, 0].mean()),
+            "y": float(box[:, 1].mean()),
+            "box": box.tolist(),
+            "tip": tip.tolist(),
+        }
+
         passed = best["confidence"] >= min_confidence
         pose = {
             "x": best["x"],
@@ -324,8 +428,10 @@ class ShapeSearchTool(Tool):
             "confidence": best["confidence"],
             "shape": "model",
             "box": best["box"],
+            "method": best.get("method"),
         }
         overlay = self._draw_hit(image, best, passed)
+        method = best.get("method") or "?"
         return {
             "id": tool.get("id"),
             "type": self.type,
@@ -334,6 +440,7 @@ class ShapeSearchTool(Tool):
             "confidence": best["confidence"],
             "min_confidence": min_confidence,
             "accel": accel.get("id", "cpu"),
+            "method": method,
             "x": round(best["x"], 1),
             "y": round(best["y"], 1),
             "angle": round(best["angle"], 1),
@@ -341,7 +448,10 @@ class ShapeSearchTool(Tool):
             "height": round(best["height"], 1),
             "box": [[round(p[0], 1), round(p[1], 1)] for p in best["box"]],
             "pose": pose,
-            "message": f"Pattern  confidence {best['confidence'] * 100:.1f}%  ∠{best['angle']:.1f}°",
+            "message": (
+                f"Pattern  confidence {best['confidence'] * 100:.1f}%  "
+                f"∠{best['angle']:.1f}°  ({method})"
+            ),
             "elapsed_ms": elapsed,
         }, overlay
 
@@ -358,9 +468,6 @@ class ShapeSearchTool(Tool):
             p1 = (int(round(tip[1, 0])), int(round(tip[1, 1])))
             cv2.line(view, p0, p1, color, thick, cv2.LINE_AA)
             cv2.drawMarker(view, p0, color, cv2.MARKER_CROSS, 16, thick)
-        else:
-            cx, cy = int(round(found["x"])), int(round(found["y"]))
-            cv2.drawMarker(view, (cx, cy), color, cv2.MARKER_CROSS, 16, thick)
         label = f"{found['confidence'] * 100:.0f}%  {found['angle']:.1f} deg"
         lx = int(round(found["x"])) + 10
         ly = int(round(found["y"])) - 12
@@ -370,12 +477,18 @@ class ShapeSearchTool(Tool):
 
     @staticmethod
     def _load_model(project_id: str, tool_id: str) -> np.ndarray | None:
+        from pathlib import Path
+
         from app.config import DATA_DIR
 
-        path = DATA_DIR / "projects" / project_id / "tools" / tool_id / "shape_model.png"
-        if not path.exists():
+        candidates = [
+            DATA_DIR / "projects" / project_id / "tools" / tool_id / "shape_model.png",
+            Path(__file__).resolve().parents[2] / "data" / "projects" / project_id / "tools" / tool_id / "shape_model.png",
+        ]
+        path = next((p for p in candidates if p.exists()), None)
+        if path is None:
             return None
-        key = f"{project_id}:{tool_id}"
+        key = f"{project_id}:{tool_id}:{path}"
         stamp = path.stat().st_mtime
         cached = _model_cache.get(key)
         if cached and cached[0] == stamp:

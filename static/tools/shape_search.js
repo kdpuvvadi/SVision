@@ -452,8 +452,8 @@
         : "";
       const ang = state.modelRoi ? angleOf(state.modelRoi) : 0;
       const hint = live
-        ? "Grab a still, draw a box, drag the orange handle (or set Angle) to rotate, then fine-tune edges before Register."
-        : "Choose an image, draw a box, rotate with the orange handle (or Angle), then fine-tune edges/corners.";
+        ? "Grab a still and draw a tight box around the part only (not the whole frame). Rotate with the orange handle if needed, then Register."
+        : "Choose an image and draw a tight box around the part only. Avoid selecting most of the frame — the overlay follows the registered model.";
       return `
         <p class="hint">${hint}</p>
         <div class="sample-actions model-toolbar">
@@ -474,7 +474,7 @@
         <p id="grabModelStatus" class="hint">${live ? "Camera is live — Grab captures a still for the model." : ""}</p>
         <p id="modelRoiReadout" class="hint model-roi-readout">No selection</p>
         <div class="roi-stage model-stage"><canvas id="modelCanvas" width="720" height="420"></canvas></div>
-        <div class="model-status ${saved ? "" : "warn"}">${saved ? `Registered model ${model.width}×${model.height}` : "Model image is not saved."}</div>
+        <div class="model-status ${saved ? (model.warning ? "warn" : "") : "warn"}">${saved ? `Registered model ${model.width}×${model.height}${model.warning ? ` — ${model.warning}` : ""}` : "Model image is not saved."}</div>
         ${saved ? `<img class="model-preview" src="${src}" alt="Registered model" />` : ""}`;
     },
     mount() {
@@ -507,6 +507,7 @@
   T.registerDetail("shape_search", (tool) => {
     let detail = tool.message || "No shape";
     if (tool.x != null) detail += `  x ${tool.x}  y ${tool.y}  angle ${tool.angle}°`;
+    if (tool.method) detail += `  · ${tool.method}`;
     if (tool.accel) detail += `  · ${tool.accel}`;
     return detail;
   });
