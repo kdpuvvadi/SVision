@@ -222,9 +222,9 @@ class ShapeSearchTool(Tool):
         step = float(cfg.get("angle_step") or 2)
         angles = _angle_list(span, step)
         inv = 1.0 / scale
-        # Unrotated model size in full-image pixels (for outline drawing).
-        model_w = float(gray_model.shape[1]) * inv
-        model_h = float(gray_model.shape[0]) * inv
+        # Outline uses the registered model pixel size (not the padded rotated AABB).
+        model_w = float(model.shape[1])
+        model_h = float(model.shape[0])
 
         best = None
         for angle in angles:
@@ -240,6 +240,7 @@ class ShapeSearchTool(Tool):
                 score, px, py, templ = score_g, px_g, py_g, templ_gray
             score = max(0.0, float(score))
             if best is None or score > best["confidence"]:
+                # Center of the rotated template AABB maps back to the model center.
                 best = {
                     "confidence": score,
                     "x": x0 + (px + templ.shape[1] / 2.0) * inv,
