@@ -227,24 +227,36 @@ def _load_remote_nodemap(device):
     return node_map
 
 
+def _cvt(src: np.ndarray, code: int) -> np.ndarray:
+    """Color convert; use OpenCL when the OpenCV build exposes it (Intel/NVIDIA)."""
+    try:
+        if cv2.ocl.haveOpenCL() and not cv2.ocl.useOpenCL():
+            cv2.ocl.setUseOpenCL(True)
+        if cv2.ocl.useOpenCL():
+            return cv2.cvtColor(cv2.UMat(src), code).get()
+    except Exception:
+        pass
+    return cv2.cvtColor(src, code)
+
+
 def _to_bgr(frame: np.ndarray, pixel_format: str) -> np.ndarray:
     fmt = (pixel_format or "").upper()
     if frame.ndim == 2 or fmt in {"MONO8", "MONO10", "MONO12", "MONO16"}:
-        return cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        return _cvt(frame, cv2.COLOR_GRAY2BGR)
     if "BAYERRG" in fmt:
-        return cv2.cvtColor(frame, cv2.COLOR_BayerRG2BGR)
+        return _cvt(frame, cv2.COLOR_BayerRG2BGR)
     if "BAYERGR" in fmt:
-        return cv2.cvtColor(frame, cv2.COLOR_BayerGR2BGR)
+        return _cvt(frame, cv2.COLOR_BayerGR2BGR)
     if "BAYERGB" in fmt:
-        return cv2.cvtColor(frame, cv2.COLOR_BayerGB2BGR)
+        return _cvt(frame, cv2.COLOR_BayerGB2BGR)
     if "BAYERBG" in fmt:
-        return cv2.cvtColor(frame, cv2.COLOR_BayerBG2BGR)
+        return _cvt(frame, cv2.COLOR_BayerBG2BGR)
     if fmt in {"RGB8", "RGB8PACKED"}:
-        return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        return _cvt(frame, cv2.COLOR_RGB2BGR)
     if fmt in {"BGR8", "BGR8PACKED"}:
         return frame
     if frame.ndim == 2:
-        return cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        return _cvt(frame, cv2.COLOR_GRAY2BGR)
     return frame
 
 
@@ -290,42 +302,44 @@ class GenTLBackend(CameraBackend):
             return CameraStatus(self.source, True, f"GenTL camera {label} ready.")
 
     def grab(self) -> np.ndarray:
-        """Return the newest live frame (flush free-run backlog first)."""
+        """Return the newest live frame without waiting an extra exposure when possible."""
         with self._lock:
             started = time.perf_counter()
             self._ensure_open()
-            self._flush_stale_buffers()
-            frame = self._grab_unlocked(ensure=False)
+            frame = self._grab_unlocked(ensure=False, prefer_latest=True)
             self._last_grab_ms = (time.perf_counter() - started) * 1000.0
             return frame
 
     def grab_fresh(self, discard: int = 0) -> np.ndarray:
-        """Same as grab — always the newest frame, not a queued older one."""
+        """Same as grab — newest queued frame (or next exposure if queue empty)."""
         del discard  # kept for call-site compatibility
         return self.grab()
 
-    def _flush_stale_buffers(self, max_flush: int = 64) -> int:
-        """Drop already-filled free-run buffers so the next wait is a new exposure.
+    def _take_latest_buffer(self, max_flush: int = 64):
+        """Keep the newest already-queued buffer; requeue older ones.
 
-        With several announced buffers the producer queues old frames. Taking the
-        next event without flushing looks 'live' (unique hashes) but can be
-        seconds behind the scene — e.g. a phone slideshow under the lens.
+        Unlike flush-then-wait, this does not pay for an extra exposure when the
+        free-run stream already has frames waiting.
         """
         assert self._stream is not None and self._event_manager is not None
-        flushed = 0
-        while flushed < max_flush:
+        newest = None
+        seen = 0
+        while seen < max_flush:
             try:
-                # 1 ms: only buffers already waiting. 0 is rejected by some producers.
                 self._event_manager.update_event_data(1)
             except Exception:
                 break
             buffer = self._event_manager.buffer
-            try:
-                self._stream.queue_buffer(buffer)
-            except Exception:
-                break
-            flushed += 1
-        return flushed
+            if newest is not None:
+                try:
+                    self._stream.queue_buffer(newest)
+                except Exception:
+                    pass
+            newest = buffer
+            seen += 1
+        if newest is not None:
+            return newest
+        return self._wait_buffer(5000)
 
     def _buffer_looks_incomplete(self, buffer) -> bool:
         """True only when GenTL clearly reports a bad transfer."""
@@ -372,14 +386,14 @@ class GenTLBackend(CameraBackend):
             raise RuntimeError(f"GenTL grab timed out ({last_err})")
         raise RuntimeError("GenTL grab timed out.")
 
-    def _grab_unlocked(self, *, ensure: bool = True) -> np.ndarray:
+    def _grab_unlocked(self, *, ensure: bool = True, prefer_latest: bool = False) -> np.ndarray:
         if ensure:
             self._ensure_open()
         assert self._stream is not None and self._event_manager is not None
         need = self._width * self._height
         last_thin = None
         for _ in range(6):
-            buffer = self._wait_buffer(5000)
+            buffer = self._take_latest_buffer() if prefer_latest else self._wait_buffer(5000)
             raw = bytes(buffer.raw_buffer)
             if len(raw) < need:
                 try:
@@ -405,7 +419,8 @@ class GenTLBackend(CameraBackend):
             # Prefer a late thin frame over failing Measure entirely.
             return _to_bgr(last_thin.copy(), self._pixel_format)
         raise RuntimeError(
-            "GenTL could not deliver a full frame. Check NIC link speed and disable jumbo frames."
+            "GenTL could not deliver a full frame. Check NIC link speed (need 1 Gbps for 5MP) "
+            "and GigE packet size."
         )
 
     def close(self) -> None:
@@ -546,29 +561,48 @@ class GenTLBackend(CameraBackend):
                 node_map.TriggerMode.value = "Off"
             except Exception:
                 pass
-        # Jumbo 9000 without matching NIC/switch MTU causes packet loss → thin-line frames.
-        # Stay on standard Ethernet payload size unless the camera already uses a smaller value.
-        if hasattr(node_map, "GevSCPSPacketSize"):
-            try:
-                current = int(node_map.GevSCPSPacketSize.value)
-                maximum = int(node_map.GevSCPSPacketSize.max)
-                minimum = int(getattr(node_map.GevSCPSPacketSize, "min", 576) or 576)
-                safe = min(1500, maximum)
-                safe = max(minimum, safe)
-                if current > 1600 or current < minimum:
-                    node_map.GevSCPSPacketSize.value = safe
-            except Exception:
-                pass
+        # Throughput: keep inter-packet delay low. A large GevSCPD (e.g. 6000) plus a
+        # 100 Mbps NIC link caps ~5MP Mono8 around 2 fps (~450–900 ms/grab).
         if hasattr(node_map, "GevSCPD"):
             try:
-                # Small inter-packet delay reduces loss on busy Intel NICs.
-                delay = int(node_map.GevSCPD.value)
-                if delay < 100:
-                    lo = int(getattr(node_map.GevSCPD, "min", 0) or 0)
-                    hi = int(getattr(node_map.GevSCPD, "max", 10000) or 10000)
-                    node_map.GevSCPD.value = min(hi, max(lo, 1000))
+                if int(node_map.GevSCPD.value) != 0:
+                    node_map.GevSCPD.value = int(getattr(node_map.GevSCPD, "min", 0) or 0)
             except Exception:
                 pass
+        # Prefer a mid-size packet: large enough for bandwidth, below jumbo risk on some NICs.
+        if hasattr(node_map, "GevSCPSPacketSize"):
+            try:
+                maximum = int(node_map.GevSCPSPacketSize.max)
+                minimum = int(getattr(node_map.GevSCPSPacketSize, "min", 576) or 576)
+                target = min(4000, maximum)
+                target = max(minimum, target)
+                node_map.GevSCPSPacketSize.value = target
+            except Exception:
+                pass
+        if hasattr(node_map, "AcquisitionFrameRate"):
+            try:
+                node_map.AcquisitionFrameRate.value = float(node_map.AcquisitionFrameRate.max)
+            except Exception:
+                pass
+        try:
+            fps = float(getattr(node_map.AcquisitionFrameRate, "value", 0) or 0)
+            fps_max = float(getattr(node_map.AcquisitionFrameRate, "max", 0) or 0)
+            exp_us = float(getattr(node_map.ExposureTime, "value", 0) or 0)
+            print(
+                f"[GenTL] stream fps≈{fps:.2f} (max {fps_max:.2f}) exposure={exp_us/1000:.1f} ms "
+                f"pkt={int(getattr(node_map.GevSCPSPacketSize, 'value', 0) or 0)} "
+                f"scpd={int(getattr(node_map.GevSCPD, 'value', 0) or 0)}",
+                flush=True,
+            )
+            if fps_max and fps_max < 5 and width * height >= 2_000_000:
+                print(
+                    "[GenTL] WARNING: ~2 fps on a 5MP stream usually means the camera NIC "
+                    "is linked at 100 Mbps. Set that adapter to 1.0 Gbps Full Duplex "
+                    "(Windows → adapter → Speed & Duplex). GPU cannot speed up GigE transfer.",
+                    flush=True,
+                )
+        except Exception:
+            pass
 
         stream = DataStream(device)
         stream.open(list(device.data_stream_ids)[0])

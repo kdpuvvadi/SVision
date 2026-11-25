@@ -221,7 +221,24 @@ class SampleModel:
 
 
 def encode_jpeg(image: np.ndarray, quality: int = 80) -> bytes:
-    ok, buf = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+    """JPEG-encode a preview. Uses OpenCL UMat when available (Intel/NVIDIA via OpenCV)."""
+    params = [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)]
+    try:
+        if cv2.ocl.haveOpenCL() and not cv2.ocl.useOpenCL():
+            cv2.ocl.setUseOpenCL(True)
+        if cv2.ocl.useOpenCL() and image.ndim >= 2:
+            # Downscale large previews on GPU path before encode (encode itself is CPU turbo).
+            h, w = image.shape[:2]
+            if max(h, w) > 1280:
+                scale = 1280.0 / max(h, w)
+                image = cv2.resize(
+                    cv2.UMat(image),
+                    (max(1, int(w * scale)), max(1, int(h * scale))),
+                    interpolation=cv2.INTER_AREA,
+                ).get()
+    except Exception:
+        pass
+    ok, buf = cv2.imencode(".jpg", image, params)
     if not ok:
         raise RuntimeError("Failed to encode preview image.")
     return buf.tobytes()
