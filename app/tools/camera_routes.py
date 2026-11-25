@@ -20,8 +20,17 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import HTTPException
+from pydantic import BaseModel, Field
 
-from app.core.cameras.gentl import discover_cti_files, list_gentl_devices
+from app.core.cameras.gentl import discover_cti_files, list_gentl_devices, test_gentl_camera
+
+
+class CameraTestBody(BaseModel):
+    cti_path: str = ""
+    device_id: str = ""
+    gige_ip: str = ""
+    source: str = "gentl"
+    usb_index: str = "0"
 
 
 def mount(app: Any) -> None:
@@ -31,9 +40,9 @@ def mount(app: Any) -> None:
         return {"files": files, "count": len(files)}
 
     @app.get("/api/cameras/devices")
-    def list_camera_devices(cti_path: str = "") -> dict:
+    def list_camera_devices(cti_path: str = "", probe_ip: int = 1) -> dict:
         try:
-            devices = list_gentl_devices(cti_path)
+            devices = list_gentl_devices(cti_path, probe_ip=bool(probe_ip))
         except FileNotFoundError as exc:
             raise HTTPException(404, str(exc)) from exc
         except ValueError as exc:
@@ -41,3 +50,11 @@ def mount(app: Any) -> None:
         except Exception as exc:
             raise HTTPException(400, str(exc)) from exc
         return {"devices": devices, "count": len(devices), "cti_path": cti_path}
+
+    @app.post("/api/cameras/test")
+    def test_camera(body: CameraTestBody) -> dict:
+        cfg = body.model_dump()
+        result = test_gentl_camera(cfg)
+        if not result.get("ok"):
+            raise HTTPException(400, result.get("message") or "Camera test failed.")
+        return result

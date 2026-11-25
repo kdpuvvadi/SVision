@@ -306,30 +306,47 @@ async function scanGentlDevices() {
   if (!tool) return;
   readOptionsIntoTool();
   const cti = (tool.config?.cti_path || "").trim();
+  const wantIp = (tool.config?.gige_ip || "").trim();
   const picker = $("devicePicker");
   if (!picker) return;
   if (!cti) {
     picker.hidden = false;
-    picker.innerHTML = `<p class="hint">Choose a CTI producer file first.</p>`;
+    picker.innerHTML = `<p class="hint">Choose a CTI producer file first (Connect → Find CTI).</p>`;
     return;
   }
   picker.hidden = false;
   picker.innerHTML = `<p class="hint">Scanning GenTL devices…</p>`;
   try {
-    const data = await api(`/api/cameras/devices?cti_path=${encodeURIComponent(cti)}`);
+    const data = await api(`/api/cameras/devices?cti_path=${encodeURIComponent(cti)}&probe_ip=1`);
     const devices = data.devices || [];
     if (!devices.length) {
-      picker.innerHTML = `<p class="hint">No cameras found for this CTI. Check the network / IP config tool.</p>`;
+      picker.innerHTML = `<p class="hint">No cameras found for this CTI. Check NIC IP subnet and StViewer / IP Config.</p>`;
       return;
+    }
+    let auto = null;
+    if (wantIp) auto = devices.find((d) => (d.ip || "") === wantIp) || null;
+    if (!auto && devices.length === 1) auto = devices[0];
+    if (auto?.id) {
+      tool.config.device_id = auto.id;
+      tool.config.source = "gentl";
+      const deviceInput = $("connectDevice") || document.querySelector('[data-key="device_id"]');
+      if (deviceInput) deviceInput.value = auto.id;
     }
     picker.innerHTML = devices.map((dev) => {
       const label = dev.display_name || dev.id || dev.serial || "Camera";
-      const meta = [dev.vendor, dev.model, dev.serial, dev.tl_type].filter(Boolean).join(" · ");
-      return `<button type="button" class="cti-choice" data-device-id="${escapeHtml(dev.id || "")}">
-        <strong>${escapeHtml(label)}</strong>
+      const meta = [dev.ip, dev.vendor, dev.model, dev.serial, dev.tl_type].filter(Boolean).join(" · ");
+      const selected = tool.config.device_id && tool.config.device_id === dev.id ? " selected" : "";
+      return `<button type="button" class="cti-choice${selected}" data-device-id="${escapeHtml(dev.id || "")}">
+        <strong>${escapeHtml(label)}${dev.ip ? ` — ${escapeHtml(dev.ip)}` : ""}</strong>
         <span>${escapeHtml(meta || dev.id || "")}</span>
       </button>`;
     }).join("");
+    if (auto?.id) {
+      picker.insertAdjacentHTML(
+        "afterbegin",
+        `<p class="hint">Selected ${escapeHtml(auto.display_name || auto.id)}${auto.ip ? ` (${escapeHtml(auto.ip)})` : ""}. Click Test grab.</p>`
+      );
+    }
   } catch (err) {
     picker.innerHTML = `<p class="hint">${escapeHtml(err.message)}</p>`;
   }
@@ -460,10 +477,8 @@ function updateImageInput() {
     $("emptyTitle").textContent = "GigE / GenTL camera";
     const who = camera.config?.device_id || camera.config?.gige_ip || "";
     $("emptyDetail").textContent = who
-      ? `Live grab from ${who}. Measure runs on the worker thread.`
-      : camera.config?.cti_path
-        ? "Scan and select a camera on the Camera tool."
-        : "Choose a CTI producer file on the Camera tool, then scan for cameras.";
+      ? `Live grab from ${who}. Open Camera → Connect → Test grab, then Measure.`
+      : "Open Camera → Connect: Find CTI, Scan (set GigE IP optional), Test grab, Save.";
   } else {
     $("emptyTitle").textContent = "Drop images here";
     $("emptyDetail").textContent = "Or choose files. This Camera tool uses uploaded images.";
@@ -856,7 +871,9 @@ function bind() {
       if (tool) {
         tool.config = tool.config || {};
         tool.config.cti_path = ctiBtn.dataset.ctiPath || "";
-        state.settingTab = "cti_path";
+        const ctiInput = $("connectCti") || document.querySelector('[data-key="cti_path"]');
+        if (ctiInput) ctiInput.value = tool.config.cti_path;
+        state.settingTab = "panel:gentl_setup";
         await saveFlow();
         renderSceneSettings();
       }
@@ -869,7 +886,9 @@ function bind() {
         tool.config = tool.config || {};
         tool.config.device_id = deviceBtn.dataset.deviceId || "";
         tool.config.source = "gentl";
-        state.settingTab = "device_id";
+        const deviceInput = $("connectDevice") || document.querySelector('[data-key="device_id"]');
+        if (deviceInput) deviceInput.value = tool.config.device_id;
+        state.settingTab = "panel:gentl_setup";
         await saveFlow();
         renderSceneSettings();
         updateImageInput();
@@ -1122,7 +1141,9 @@ function bind() {
       if (tool) {
         tool.config = tool.config || {};
         tool.config.cti_path = ctiBtn.dataset.ctiPath || "";
-        state.settingTab = "cti_path";
+        const ctiInput = $("connectCti") || document.querySelector('[data-key="cti_path"]');
+        if (ctiInput) ctiInput.value = tool.config.cti_path;
+        state.settingTab = "panel:gentl_setup";
         await saveFlow();
         renderOptions();
       }
@@ -1135,7 +1156,9 @@ function bind() {
         tool.config = tool.config || {};
         tool.config.device_id = deviceBtn.dataset.deviceId || "";
         tool.config.source = "gentl";
-        state.settingTab = "device_id";
+        const deviceInput = $("connectDevice") || document.querySelector('[data-key="device_id"]');
+        if (deviceInput) deviceInput.value = tool.config.device_id;
+        state.settingTab = "panel:gentl_setup";
         await saveFlow();
         renderOptions();
         updateImageInput();

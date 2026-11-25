@@ -100,13 +100,41 @@ def discover_cti_files(extra: list[str] | None = None) -> list[dict[str, str]]:
     return sorted(found.values(), key=sort_key)
 
 
-def list_gentl_devices(cti_path: str) -> list[dict[str, str]]:
+def _format_ipv4(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return str(value).strip()
+    return ".".join(str((number >> shift) & 255) for shift in (24, 16, 8, 0))
+
+
+def _read_device_ip(device) -> str:
+    try:
+        node_map = _load_remote_nodemap(device)
+    except Exception:
+        return ""
+    for name in ("GevCurrentIPAddress", "GevPersistentIPAddress", "DeviceIPAddress"):
+        if not hasattr(node_map, name):
+            continue
+        try:
+            return _format_ipv4(getattr(node_map, name).value)
+        except Exception:
+            continue
+    return ""
+
+
+def list_gentl_devices(cti_path: str, *, probe_ip: bool = True) -> list[dict[str, str]]:
     cti = (cti_path or "").strip()
     if not cti:
         raise ValueError("Choose a GenTL .cti producer file first.")
     if not Path(cti).is_file():
         raise FileNotFoundError(f"CTI file not found: {cti}")
     try:
+        from genicam.gentl import DEVICE_ACCESS_FLAGS_LIST as DAF
         from genicam.gentl import GenTLProducer
     except ImportError as exc:
         raise RuntimeError("GenTL support needs the genicam package. Run install.bat.") from exc
@@ -124,17 +152,35 @@ def list_gentl_devices(cti_path: str) -> list[dict[str, str]]:
             try:
                 iface.update_device_info_list(4000)
                 for info in iface.device_info_list:
-                    devices.append(
-                        {
-                            "id": str(getattr(info, "id_", "") or ""),
-                            "display_name": str(getattr(info, "display_name", "") or ""),
-                            "model": str(getattr(info, "model", "") or ""),
-                            "vendor": str(getattr(info, "vendor", "") or ""),
-                            "serial": str(getattr(info, "serial_number", "") or ""),
-                            "tl_type": str(getattr(info, "tl_type", "") or ""),
-                            "interface": str(getattr(iface_info, "display_name", "") or ""),
-                        }
-                    )
+                    row = {
+                        "id": str(getattr(info, "id_", "") or ""),
+                        "display_name": str(getattr(info, "display_name", "") or ""),
+                        "model": str(getattr(info, "model", "") or ""),
+                        "vendor": str(getattr(info, "vendor", "") or ""),
+                        "serial": str(getattr(info, "serial_number", "") or ""),
+                        "tl_type": str(getattr(info, "tl_type", "") or ""),
+                        "interface": str(getattr(iface_info, "display_name", "") or ""),
+                        "ip": "",
+                    }
+                    if probe_ip:
+                        device = None
+                        try:
+                            device = info.create_device()
+                            try:
+                                device.open(DAF.DEVICE_ACCESS_CONTROL)
+                            except Exception:
+                                device.open(DAF.DEVICE_ACCESS_READONLY)
+                            row["ip"] = _read_device_ip(device)
+                        except Exception:
+                            row["ip"] = ""
+                        finally:
+                            if device is not None:
+                                try:
+                                    if device.is_open():
+                                        device.close()
+                                except Exception:
+                                    pass
+                    devices.append(row)
             finally:
                 iface.close()
         return devices
@@ -285,35 +331,87 @@ class GenTLBackend(CameraBackend):
         system.open()
         system.update_interface_info_list(3000)
 
-        target = None
-        iface = None
-        display = ""
         wanted = self.device_id
+        want_ip = self.gige_ip.strip()
+        found: list[tuple[Any, Any, str]] = []
         for iface_info in system.interface_info_list:
             candidate = iface_info.create_interface()
             candidate.open()
             candidate.update_device_info_list(4000)
+            matched = False
             for info in candidate.device_info_list:
                 device_id = str(getattr(info, "id_", "") or "")
                 serial = str(getattr(info, "serial_number", "") or "")
                 name = str(getattr(info, "display_name", "") or "")
                 if wanted and wanted not in {device_id, serial, name}:
                     continue
-                target = info
-                iface = candidate
-                display = name or device_id or serial
+                found.append((candidate, info, name or device_id or serial))
+                matched = True
+                if wanted:
+                    break
+            if matched and wanted:
                 break
-            if target is not None:
-                break
-            candidate.close()
+            if not matched:
+                candidate.close()
+
+        target = None
+        iface = None
+        display = ""
+        if wanted and found:
+            iface, target, display = found[0]
+        elif want_ip and found:
+            for candidate, info, name in found:
+                probe = None
+                try:
+                    probe = info.create_device()
+                    try:
+                        probe.open(DAF.DEVICE_ACCESS_CONTROL)
+                    except Exception:
+                        probe.open(DAF.DEVICE_ACCESS_READONLY)
+                    ip = _read_device_ip(probe)
+                    if ip == want_ip:
+                        target = info
+                        iface = candidate
+                        display = f"{name} ({ip})" if ip else name
+                        break
+                except Exception:
+                    continue
+                finally:
+                    if probe is not None:
+                        try:
+                            if probe.is_open():
+                                probe.close()
+                        except Exception:
+                            pass
+            if target is None and len(found) == 1:
+                iface, target, display = found[0]
+        elif found:
+            iface, target, display = found[0]
 
         if target is None:
+            for candidate, _info, _name in found:
+                try:
+                    if candidate is not iface and candidate.is_open():
+                        candidate.close()
+                except Exception:
+                    pass
             system.close()
             producer.close()
-            hint = wanted or self.gige_ip or "any"
-            raise RuntimeError(f"No GenTL camera matched ({hint}). Scan devices after choosing the CTI file.")
+            hint = wanted or want_ip or "any"
+            raise RuntimeError(
+                f"No GenTL camera matched ({hint}). "
+                "Open Camera → Connect: Find CTI, Scan, then select the camera (or set GigE IP)."
+            )
 
         assert iface is not None
+        for candidate, _info, _name in found:
+            if candidate is not iface:
+                try:
+                    if candidate.is_open():
+                        candidate.close()
+                except Exception:
+                    pass
+
         device = target.create_device()
         try:
             device.open(DAF.DEVICE_ACCESS_EXCLUSIVE)
@@ -412,6 +510,29 @@ class GenTLBackend(CameraBackend):
         self._handles = []
         self._keep = []
         self._acquiring = False
+
+
+def test_gentl_camera(config: dict[str, Any]) -> dict[str, Any]:
+    """Open, grab one frame, then close. Used by Camera → Connect."""
+    backend = GenTLBackend(config)
+    try:
+        status = backend.status()
+        if not status.connected:
+            return {"ok": False, "message": status.message, "width": 0, "height": 0}
+        frame = backend.grab()
+        height, width = frame.shape[:2]
+        return {
+            "ok": True,
+            "message": f"Connected. Grabbed {width}×{height} from {backend._label or backend.device_id or backend.gige_ip}.",
+            "width": width,
+            "height": height,
+            "device_id": backend.device_id,
+            "label": backend._label,
+        }
+    except Exception as exc:
+        return {"ok": False, "message": str(exc), "width": 0, "height": 0}
+    finally:
+        backend.close()
 
 
 register_backend(GenTLBackend, "gige")

@@ -18,11 +18,14 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import numpy as np
 
 from app.tools.base import Tool
 from app.tools.registry import register
+
+_DEFAULT_CTI = Path(r"C:\Program Files\Common Files\OMRON_SENTECH\GenTL\v1_5\StGenTL_MD_VC141_v1_5.cti")
 
 
 class CameraTool(Tool):
@@ -56,33 +59,42 @@ class CameraTool(Tool):
                 "key": "cti_path",
                 "label": "CTI producer",
                 "kind": "cti",
-                "placeholder": r"C:\Program Files\Common Files\OMRON_SENTECH\GenTL\v1_5\StGenTL_MD_VC141_v1_5.cti",
+                "placeholder": str(_DEFAULT_CTI),
             },
             {
                 "key": "device_id",
-                "label": "Camera",
+                "label": "Camera id",
                 "kind": "gentl_device",
-                "placeholder": "Scan after choosing a CTI file",
+                "placeholder": "Filled by Connect → Scan",
             },
             {
                 "key": "gige_ip",
-                "label": "IP note",
+                "label": "GigE IP",
                 "kind": "text",
-                "placeholder": "192.168.250.4 (optional note)",
+                "placeholder": "192.168.250.4",
             },
         ]
+
+    def panels(self) -> list[str]:
+        return ["gentl_setup"]
+
+    def panel_labels(self) -> dict[str, str]:
+        return {"gentl_setup": "Connect"}
 
     def default_config(self) -> dict:
         return {
             "source": "upload",
             "usb_index": "0",
-            "cti_path": "",
+            "cti_path": str(_DEFAULT_CTI) if _DEFAULT_CTI.is_file() else "",
             "device_id": "",
             "gige_ip": "",
         }
 
     def status(self) -> str:
-        return "Upload for offline checks. USB or GigE GenTL for live PLC measure."
+        return (
+            "For GigE: Source → GigE / GenTL, then open Connect. "
+            "Find CTI, Scan, pick the camera (or set GigE IP), Test, Save."
+        )
 
     def mount(self, app) -> None:
         from app.tools import camera_routes
