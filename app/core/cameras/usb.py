@@ -66,6 +66,14 @@ class UsbBackend(CameraBackend):
             raise RuntimeError("Camera grab failed. No frame.")
         return frame
 
+    def grab_fresh(self, discard: int = 2) -> np.ndarray:
+        if not self._open():
+            raise RuntimeError(f"USB camera index {self.index} is not available.")
+        assert self._cap is not None
+        for _ in range(max(0, int(discard))):
+            self._cap.read()
+        return self.grab()
+
     def close(self) -> None:
         if self._cap is not None:
             self._cap.release()

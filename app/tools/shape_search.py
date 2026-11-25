@@ -123,7 +123,10 @@ class ShapeSearchTool(Tool):
         return {"search_roi": None, "min_confidence": 0.6, "angle_range": "10"}
 
     def status(self) -> str:
-        return "Open Model, choose an image, draw around the pattern, then Register. The pattern can be any shape."
+        return (
+            "Open Model. If Camera is USB/GenTL, Grab from camera; otherwise choose an image. "
+            "Draw around the pattern, then Register."
+        )
 
     def mount(self, app) -> None:
         from app.tools import shape_search_routes

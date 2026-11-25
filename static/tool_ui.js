@@ -50,7 +50,7 @@
         loaded.add(src);
         return new Promise((resolve, reject) => {
           const script = document.createElement("script");
-          script.src = src.includes("?") ? src : `${src}?v=3`;
+          script.src = src.includes("?") ? src : `${src}?v=4`;
           script.async = false;
           script.onload = () => resolve();
           script.onerror = () => reject(new Error(`Failed to load tool UI ${src}`));

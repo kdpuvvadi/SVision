@@ -81,6 +81,59 @@ function cameraIsUpload() {
   return !!camera && (camera.config?.source || "upload") === "upload";
 }
 
+function cameraIsLive() {
+  const source = (cameraTool()?.config?.source || "upload").toLowerCase();
+  return source === "gentl" || source === "gige" || source === "usb";
+}
+
+async function grabLiveCamera() {
+  if (!state.project?.id) throw new Error("Open a scene first.");
+  if (!cameraIsLive()) {
+    throw new Error("Set Camera → Source to USB or GigE / GenTL, then grab.");
+  }
+  const res = await fetch(`/api/projects/${state.project.id}/camera/grab?fresh=1`, { method: "POST" });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    const detail = data.detail;
+    const msg = typeof detail === "string" ? detail : (Array.isArray(detail) ? detail[0]?.msg : "") || res.statusText;
+    throw new Error(msg || "Camera grab failed.");
+  }
+  const blob = await res.blob();
+  if (!blob || !blob.size) throw new Error("Camera returned an empty frame.");
+  if (state.sourceUrl) URL.revokeObjectURL(state.sourceUrl);
+  state.sourceUrl = URL.createObjectURL(blob);
+  state.storedImage = true;
+  state.outputId = null;
+  $("emptyState").hidden = true;
+  $("preview").hidden = false;
+  $("preview").src = state.sourceUrl;
+  $("imageName").textContent = "live-camera.jpg";
+  const w = res.headers.get("X-Image-Width");
+  const h = res.headers.get("X-Image-Height");
+  $("imageSize").textContent = w && h ? `${w} × ${h}` : "";
+  resetZoom();
+  return blob;
+}
+
+async function grabShapeModelFromCamera() {
+  const status = $("grabModelStatus");
+  if (status) status.textContent = "Grabbing from camera…";
+  try {
+    const blob = await grabLiveCamera();
+    const file = new File([blob], "live-camera.jpg", { type: "image/jpeg" });
+    state.modelFile = file;
+    state.modelRoi = null;
+    if (state.modelUrl) URL.revokeObjectURL(state.modelUrl);
+    state.modelUrl = URL.createObjectURL(file);
+    drawModelCanvas();
+    if (typeof drawRoiCanvas === "function") drawRoiCanvas();
+    if (status) status.textContent = "Grabbed. Draw the pattern, then Register.";
+  } catch (err) {
+    if (status) status.textContent = err.message || String(err);
+    throw err;
+  }
+}
+
 function flowPayload() {
   return {
     logic: "all",
@@ -902,6 +955,14 @@ function bind() {
       await saveFlow();
       return;
     }
+    if (e.target.id === "grabModelCamera") {
+      try {
+        await grabShapeModelFromCamera();
+      } catch (err) {
+        alert(err.message);
+      }
+      return;
+    }
     if (e.target.id === "registerModel") {
       await registerShapeModel();
       return;
@@ -1170,6 +1231,14 @@ function bind() {
       const key = e.target.dataset.roiKey || "roi";
       if (tool) tool.config[key] = null;
       await saveFlow();
+      return;
+    }
+    if (e.target.id === "grabModelCamera") {
+      try {
+        await grabShapeModelFromCamera();
+      } catch (err) {
+        alert(err.message);
+      }
       return;
     }
     if (e.target.id === "registerModel") {
@@ -1701,7 +1770,7 @@ function renderBatch(data) {
 async function registerShapeModel() {
   const tool = selectedTool();
   if (!tool || !state.modelFile) {
-    alert("Choose an image, then draw the pattern.");
+    alert(cameraIsLive() ? "Grab from camera (or choose an image), then draw the pattern." : "Choose an image, then draw the pattern.");
     return;
   }
   if (!state.modelRoi) {

@@ -20,9 +20,13 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import HTTPException
-from pydantic import BaseModel, Field
+from fastapi.responses import Response
+from pydantic import BaseModel
 
+from app.core.camera import camera_config_from_project, camera_from_project
 from app.core.cameras.gentl import discover_cti_files, list_gentl_devices, test_gentl_camera
+from app.core.classifier import encode_jpeg
+from app.storage.store import current_images, store
 
 
 class CameraTestBody(BaseModel):
@@ -58,3 +62,41 @@ def mount(app: Any) -> None:
         if not result.get("ok"):
             raise HTTPException(400, result.get("message") or "Camera test failed.")
         return result
+
+    @app.post("/api/projects/{project_id}/camera/grab")
+    def grab_project_camera(project_id: str, fresh: int = 1) -> Response:
+        """Trigger a live grab for tools that need a still (Shape Search model, ROI, …)."""
+        try:
+            project = store.get_project(project_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        source, _cfg = camera_config_from_project(project)
+        if source == "upload":
+            raise HTTPException(
+                400,
+                "Camera source is Upload. Choose an image file, or set Camera → Source to USB / GenTL.",
+            )
+        try:
+            cam = camera_from_project(project)
+            backend = getattr(cam, "_backend", None)
+            if fresh and backend is not None and hasattr(backend, "grab_fresh"):
+                frame = backend.grab_fresh()
+            else:
+                frame = cam.grab()
+        except Exception as exc:
+            raise HTTPException(400, str(exc)) from exc
+        jpeg = encode_jpeg(frame, 90)
+        try:
+            current_images.save(project_id, [("live-camera.jpg", jpeg)])
+        except Exception:
+            pass
+        height, width = frame.shape[:2]
+        return Response(
+            content=jpeg,
+            media_type="image/jpeg",
+            headers={
+                "X-Image-Width": str(width),
+                "X-Image-Height": str(height),
+                "X-Camera-Source": source,
+            },
+        )

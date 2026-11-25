@@ -292,25 +292,51 @@ class GenTLBackend(CameraBackend):
     def grab(self) -> np.ndarray:
         with self._lock:
             started = time.perf_counter()
-            self._ensure_open()
-            assert self._stream is not None and self._event_manager is not None
-            self._event_manager.update_event_data(5000)
-            buffer = self._event_manager.buffer
-            ctx = buffer.context
-            if isinstance(ctx, int) and 0 <= ctx < len(self._keep):
-                data = self._keep[ctx]
-            else:
-                data = bytes(buffer.raw_buffer)
-            mono = np.frombuffer(data, dtype=np.uint8, count=self._width * self._height).reshape(
-                self._height, self._width
-            )
-            frame = _to_bgr(mono.copy(), self._pixel_format)
-            try:
-                self._stream.queue_buffer(buffer)
-            except Exception:
-                pass
+            frame = self._grab_unlocked()
             self._last_grab_ms = (time.perf_counter() - started) * 1000.0
             return frame
+
+    def grab_fresh(self, discard: int = 2) -> np.ndarray:
+        """Drop buffered frames, optionally software-trigger, then grab current scene."""
+        with self._lock:
+            started = time.perf_counter()
+            self._ensure_open()
+            assert self._stream is not None and self._event_manager is not None
+            for _ in range(max(0, int(discard))):
+                try:
+                    self._event_manager.update_event_data(1)
+                    self._stream.queue_buffer(self._event_manager.buffer)
+                except Exception:
+                    break
+            if self._node_map is not None and hasattr(self._node_map, "TriggerSoftware"):
+                try:
+                    self._node_map.TriggerSoftware.execute()
+                except Exception:
+                    pass
+            frame = self._grab_unlocked(ensure=False)
+            self._last_grab_ms = (time.perf_counter() - started) * 1000.0
+            return frame
+
+    def _grab_unlocked(self, *, ensure: bool = True) -> np.ndarray:
+        if ensure:
+            self._ensure_open()
+        assert self._stream is not None and self._event_manager is not None
+        self._event_manager.update_event_data(5000)
+        buffer = self._event_manager.buffer
+        ctx = buffer.context
+        if isinstance(ctx, int) and 0 <= ctx < len(self._keep):
+            data = self._keep[ctx]
+        else:
+            data = bytes(buffer.raw_buffer)
+        mono = np.frombuffer(data, dtype=np.uint8, count=self._width * self._height).reshape(
+            self._height, self._width
+        )
+        frame = _to_bgr(mono.copy(), self._pixel_format)
+        try:
+            self._stream.queue_buffer(buffer)
+        except Exception:
+            pass
+        return frame
 
     def close(self) -> None:
         with self._lock:
