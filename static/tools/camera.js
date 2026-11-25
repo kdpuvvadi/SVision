@@ -5,6 +5,8 @@
 
   const DEFAULT_CTI =
     "C:\\Program Files\\Common Files\\OMRON_SENTECH\\GenTL\\v1_5\\StGenTL_MD_VC141_v1_5.cti";
+  /** Survives saveFlow → renderSceneSettings remount (DOM status text alone does not). */
+  const lastTestMsg = Object.create(null);
 
   T.registerFieldKind("cti", (tool, field) => {
     const value = tool.config?.[field.key];
@@ -71,7 +73,7 @@
         <div class="sample-actions" style="margin-top:10px;">
           <button type="button" id="cameraTestBtn" class="primary">Test grab</button>
         </div>
-        <p id="cameraTestStatus" class="hint">Not tested yet.</p>`;
+        <p id="cameraTestStatus" class="hint">${escapeHtml(lastTestMsg[tool.id] || "Not tested yet.")}</p>`;
     },
     mount(tool) {
       const cfg = tool.config || {};
@@ -87,8 +89,10 @@
         if (typeof readOptionsIntoTool === "function") readOptionsIntoTool();
         const current = typeof selectedTool === "function" ? selectedTool() : tool;
         const conf = current?.config || {};
+        const tid = current?.id || tool.id;
         const status = document.getElementById("cameraTestStatus");
-        if (status) status.textContent = "Opening camera…";
+        lastTestMsg[tid] = "Opening camera…";
+        if (status) status.textContent = lastTestMsg[tid];
         try {
           const out = await api("/api/cameras/test", {
             method: "POST",
@@ -101,11 +105,13 @@
             }),
           });
           if (out.device_id && current) current.config.device_id = out.device_id;
-          if (status) status.textContent = out.message || "OK";
+          lastTestMsg[tid] = out.message || "OK";
+          if (status) status.textContent = lastTestMsg[tid];
           if (typeof saveFlow === "function") await saveFlow();
           if (typeof updateImageInput === "function") updateImageInput();
         } catch (err) {
-          if (status) status.textContent = err.message || String(err);
+          lastTestMsg[tid] = err.message || String(err);
+          if (status) status.textContent = lastTestMsg[tid];
         }
       });
     },

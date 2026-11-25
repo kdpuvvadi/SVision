@@ -579,6 +579,17 @@ article header label { flex-direction: row; align-items: center; color: var(--te
     border-left: 1px solid var(--line);
     border-top: 1px solid var(--line);
   }
+  /* Tool Connect/settings must stay clickable — judge was covering Test grab */
+  body.flow-open.tool-settings #inspect.active,
+  body.mode-edit.flow-open.tool-settings #inspect.active {
+    grid-template-rows: minmax(58vh, 1fr) minmax(160px, 34vh);
+    grid-template-areas:
+      "stage stage"
+      "flow flow";
+  }
+  body.flow-open.tool-settings #inspect.active > .judge {
+    display: none;
+  }
   .brand div { display: none; }
   .project-pick { font-size: 0; gap: 0; }
   .project-pick select { font-size: 14px; max-width: 140px; }
@@ -627,6 +638,16 @@ article header label { flex-direction: row; align-items: center; color: var(--te
   }
   #inspect.active > .flow {
     border-top: 1px solid var(--line);
+  }
+  body.flow-open.tool-settings #inspect.active,
+  body.mode-edit.flow-open.tool-settings #inspect.active {
+    grid-template-rows: minmax(55vh, 1fr) auto;
+    grid-template-areas:
+      "stage"
+      "flow";
+  }
+  body.flow-open.tool-settings #inspect.active > .judge {
+    display: none;
   }
   .brand small { display: none; }
   .project-pick select { max-width: 120px; }
