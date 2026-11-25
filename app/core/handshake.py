@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from queue import Empty, Full, Queue
 from typing import Any
 
+from app.core.logutil import log
+
 
 JUDGMENT_IDLE = 0
 JUDGMENT_OK = 1
@@ -140,20 +142,19 @@ class HandshakeState:
             level = bool(value)
             rising = level and not self._prev_trigger
             if level:
-                print(
+                log(
                     f"[PLC] TRIGGER write=1 rising={rising} busy={self._busy} "
-                    f"scene={self._production_project_id or '-'}",
-                    flush=True,
+                    f"scene={self._production_project_id or '-'}"
                 )
             self._trigger = level
             self._prev_trigger = level
             if not level:
                 return False
             if not rising:
-                print("[PLC] TRIGGER ignored (need rising edge: write 0 then 1, or wait for clear)", flush=True)
+                log("[PLC] TRIGGER ignored (need rising edge: write 0 then 1, or wait for clear)")
                 return False
             if self._busy:
-                print("[PLC] TRIGGER ignored (BUSY)", flush=True)
+                log("[PLC] TRIGGER ignored (BUSY)")
                 return False
             pid = (project_id or self._production_project_id or "").strip()
             if not pid:
@@ -168,7 +169,7 @@ class HandshakeState:
                 self._trigger = False
                 self._prev_trigger = False
                 pulse_error = "No production scene selected. Open PLC settings and Save."
-                print(f"[PLC] TRIGGER failed: {pulse_error}", flush=True)
+                log(f"[PLC] TRIGGER failed: {pulse_error}")
             else:
                 self._last_trigger_at = time.time()
                 self._error = False
@@ -178,9 +179,9 @@ class HandshakeState:
                     self._trigger = False
                     self._prev_trigger = False
                     pulse_error = "Measure queue full (busy)."
-                    print(f"[PLC] TRIGGER failed: {pulse_error}", flush=True)
+                    log(f"[PLC] TRIGGER failed: {pulse_error}")
                 else:
-                    print(f"[PLC] TRIGGER accepted → measure queued scene={pid} source=stored", flush=True)
+                    log(f"[PLC] TRIGGER accepted → measure queued scene={pid} source=stored")
                     self._trigger = False
                     self._prev_trigger = False
                     return True
@@ -196,7 +197,7 @@ class HandshakeState:
         filename: str = "image",
         image_bytes: bytes | None = None,
     ) -> MeasureJob:
-        print(f"[PLC] UI/API measure request scene={project_id} source={source}", flush=True)
+        log(f"[PLC] UI/API measure request scene={project_id} source={source}")
         job = MeasureJob(
             project_id=project_id,
             source=source,
@@ -205,7 +206,7 @@ class HandshakeState:
         )
         if self.is_busy() or not self.trigger_queue.offer(job):
             job.error = "Measure is busy."
-            print("[PLC] UI/API measure rejected (busy)", flush=True)
+            log("[PLC] UI/API measure rejected (busy)")
             job.done_event.set()
             return job
         with self._lock:

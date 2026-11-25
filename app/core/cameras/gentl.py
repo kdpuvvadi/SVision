@@ -668,18 +668,18 @@ class GenTLBackend(CameraBackend):
             fps = float(getattr(node_map.AcquisitionFrameRate, "value", 0) or 0)
             fps_max = float(getattr(node_map.AcquisitionFrameRate, "max", 0) or 0)
             exp_us = float(getattr(node_map.ExposureTime, "value", 0) or 0)
-            print(
+            from app.core.logutil import log
+
+            log(
                 f"[GenTL] stream fps≈{fps:.2f} (max {fps_max:.2f}) exposure={exp_us/1000:.1f} ms "
                 f"pkt={int(getattr(node_map.GevSCPSPacketSize, 'value', 0) or 0)} "
-                f"scpd={int(getattr(node_map.GevSCPD, 'value', 0) or 0)}",
-                flush=True,
+                f"scpd={int(getattr(node_map.GevSCPD, 'value', 0) or 0)}"
             )
             if fps_max and fps_max < 5 and width * height >= 2_000_000:
-                print(
+                log(
                     "[GenTL] WARNING: ~2 fps on a 5MP stream usually means the camera NIC "
                     "is linked at 100 Mbps. Set that adapter to 1.0 Gbps Full Duplex "
-                    "(Windows → adapter → Speed & Duplex). GPU cannot speed up GigE transfer.",
-                    flush=True,
+                    "(Windows → adapter → Speed & Duplex). GPU cannot speed up GigE transfer."
                 )
         except Exception:
             pass
@@ -720,10 +720,9 @@ class GenTLBackend(CameraBackend):
         self._last_open_ms = (time.perf_counter() - open_started) * 1000.0
         if not self.device_id:
             self.device_id = str(getattr(target, "id_", "") or "")
-        print(
-            f"[GenTL] open {self._last_open_ms:.0f} ms device={self._label or self.device_id}",
-            flush=True,
-        )
+        from app.core.logutil import log
+
+        log(f"[GenTL] open {self._last_open_ms:.0f} ms device={self._label or self.device_id}")
 
     def _safe_close(self) -> None:
         from contextlib import suppress

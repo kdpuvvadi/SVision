@@ -215,7 +215,9 @@ class RobotStreamHub:
                         },
                     )
             except Exception as exc:
-                print(f"[RobotStream] continuous error: {exc}", flush=True)
+                from app.core.logutil import log
+
+                log(f"[RobotStream] continuous error: {exc}")
             elapsed = time.perf_counter() - started
             if stop.wait(max(0.05, period - elapsed)):
                 break

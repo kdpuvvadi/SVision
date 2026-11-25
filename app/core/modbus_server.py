@@ -126,10 +126,9 @@ class ModbusTcpAdapter:
                     raw = address + offset
                     logical = raw - 1 if address >= 1 else raw
                     if logical == COIL_TRIGGER and int(value):
-                        print(
-                            f"[Modbus] TRIGGER coil write raw={raw} logical={logical} value=1",
-                            flush=True,
-                        )
+                        from app.core.logutil import log as slog
+
+                        slog(f"[Modbus] TRIGGER coil write raw={raw} logical={logical} value=1")
                         handshake.set_trigger(True)
                     elif logical == COIL_TRIGGER and not int(value):
                         handshake.set_trigger(False)
@@ -203,7 +202,9 @@ class ModbusTcpAdapter:
 
             self._status["running"] = True
             self._status["error"] = ""
-            print(f"[Modbus] listening on {host}:{port} unit={unit_id}", flush=True)
+            from app.core.logutil import log as slog
+
+            slog(f"[Modbus] listening on {host}:{port} unit={unit_id}")
             await StartAsyncTcpServer(context=context, address=(host, port))
 
         try:

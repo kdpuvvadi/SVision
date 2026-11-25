@@ -23,6 +23,7 @@ import time
 from app.core.camera import camera_from_project
 from app.core.engine import decode_image, inspect_array, inspect_many
 from app.core.handshake import MeasureJob, handshake
+from app.core.logutil import log
 from app.storage.store import current_images, store
 
 
@@ -64,7 +65,7 @@ class MeasureService:
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, name="svision-measure", daemon=True)
         self._thread.start()
-        print("[Measure] worker thread started", flush=True)
+        log("[Measure] worker thread started")
 
     def stop(self) -> None:
         self._stop.set()
@@ -97,12 +98,12 @@ class MeasureService:
 
     def _run_job(self, job: MeasureJob) -> None:
         started = time.perf_counter()
-        print(f"[Measure] start scene={job.project_id} source={job.source} file={job.filename}", flush=True)
+        log(f"[Measure] start scene={job.project_id} source={job.source} file={job.filename}")
         handshake.begin_cycle()
         handshake.set_ready(False)
         try:
             stored = current_images.files(job.project_id)
-            print(f"[Measure] stored images={len(stored)}", flush=True)
+            log(f"[Measure] stored images={len(stored)}")
             project = store.get_project(job.project_id)
             result = self._inspect(project, job)
             elapsed = (time.perf_counter() - started) * 1000.0
@@ -128,16 +129,15 @@ class MeasureService:
                 notify_measure_done(job.project_id, result)
             except Exception:
                 pass
-            print(
+            log(
                 f"[Measure] done judgment={overall_judgment} elapsed_ms={elapsed:.1f} "
-                f"message={result.get('message') or ''}",
-                flush=True,
+                f"message={result.get('message') or ''}"
             )
         except Exception as exc:
             elapsed = (time.perf_counter() - started) * 1000.0
             job.error = str(exc)
             handshake.finish_error(str(exc), elapsed)
-            print(f"[Measure] ERROR after {elapsed:.1f} ms: {exc}", flush=True)
+            log(f"[Measure] ERROR after {elapsed:.1f} ms: {exc}")
         finally:
             job.done_event.set()
             self._refresh_ready()
@@ -174,10 +174,9 @@ class MeasureService:
             grab_started = time.perf_counter()
             frame = cam.grab_fresh()
             grab_ms = (time.perf_counter() - grab_started) * 1000.0
-            print(
+            log(
                 f"[Measure] live grab {grab_ms:.1f} ms "
-                f"(open={getattr(cam, 'last_open_ms', 0):.0f} ms source={cam.source})",
-                flush=True,
+                f"(open={getattr(cam, 'last_open_ms', 0):.0f} ms source={cam.source})"
             )
             item = inspect_array(job.project_id, frame, f"live-{cam.source}")
             # CameraTool.run() only times metadata on an already-grabbed frame; fold

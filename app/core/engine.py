@@ -62,37 +62,48 @@ def _oriented_rect_points(cx: float, cy: float, rw: float, rh: float, angle_deg:
 
 
 def _mark_pose(view: np.ndarray, result: dict, src_w: int, src_h: int) -> np.ndarray:
-    if result.get("x") is None or not result.get("width") or not result.get("height") or src_w <= 0 or src_h <= 0:
+    if src_w <= 0 or src_h <= 0:
+        return view
+    box = result.get("box") or (result.get("pose") or {}).get("box")
+    if not box and (result.get("x") is None or not result.get("width") or not result.get("height")):
         return view
     marked = view.copy()
     sx = marked.shape[1] / src_w
     sy = marked.shape[0] / src_h
-    x = float(result["x"])
-    y = float(result["y"])
-    rw = float(result["width"])
-    rh = float(result["height"])
-    angle = float(result.get("angle") or 0.0)
     color = (40, 220, 160) if result.get("judgment") == "OK" else (60, 60, 230)
     thick = max(2, int(round(min(marked.shape[:2]) / 320)))
-    pts = _oriented_rect_points(x, y, rw, rh, angle)
-    pts[:, 0] *= sx
-    pts[:, 1] *= sy
+    if box and len(box) >= 4:
+        pts = np.asarray(box, dtype=np.float64)
+        pts = np.column_stack((pts[:, 0] * sx, pts[:, 1] * sy))
+        x = float(np.mean(pts[:, 0]))
+        y = float(np.mean(pts[:, 1]))
+    else:
+        x = float(result["x"])
+        y = float(result["y"])
+        rw = float(result["width"])
+        rh = float(result["height"])
+        angle = float(result.get("angle") or 0.0)
+        pts = _oriented_rect_points(x, y, rw, rh, angle)
+        pts[:, 0] *= sx
+        pts[:, 1] *= sy
+        x, y = x * sx, y * sy
     cv2.polylines(marked, [np.int32(np.round(pts))], True, color, thick, cv2.LINE_AA)
-    # Orientation tick toward the top edge of the model (local -Y).
+    angle = float(result.get("angle") or 0.0)
     rad = np.deg2rad(angle)
+    rh = float(result.get("height") or 0.0) * sy
     tip_x = x + (-rh * 0.55) * np.sin(rad)
     tip_y = y + (-rh * 0.55) * np.cos(rad)
     cv2.line(
         marked,
-        (int(round(x * sx)), int(round(y * sy))),
-        (int(round(tip_x * sx)), int(round(tip_y * sy))),
+        (int(round(x)), int(round(y))),
+        (int(round(tip_x)), int(round(tip_y))),
         color,
         thick,
         cv2.LINE_AA,
     )
-    cv2.drawMarker(marked, (int(round(x * sx)), int(round(y * sy))), color, cv2.MARKER_CROSS, 14, thick)
+    cv2.drawMarker(marked, (int(round(x)), int(round(y))), color, cv2.MARKER_CROSS, 14, thick)
     label = f"{angle:.1f} deg"
-    lx, ly = int(round(x * sx) + 10), int(round(y * sy) - 10)
+    lx, ly = int(round(x) + 10), int(round(y) - 10)
     cv2.putText(marked, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (20, 20, 20), 3, cv2.LINE_AA)
     cv2.putText(marked, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
     return marked

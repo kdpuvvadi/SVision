@@ -28,15 +28,6 @@ from app.tools.base import Tool
 from app.tools.registry import register
 
 
-def _preview(image: np.ndarray, limit: int = 960) -> np.ndarray:
-    h, w = image.shape[:2]
-    long_edge = max(h, w)
-    if long_edge <= limit:
-        return image.copy()
-    scale = limit / long_edge
-    return cv2.resize(image, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_AREA)
-
-
 def _gray(image: np.ndarray) -> np.ndarray:
     if image.ndim == 2:
         return image
@@ -66,14 +57,17 @@ def _rotate(gray: np.ndarray, angle: float) -> np.ndarray:
     return cv2.warpAffine(gray, matrix, (nw, nh), flags=cv2.INTER_LINEAR, borderValue=0)
 
 
-def _small(image: np.ndarray, max_edge: int = _MAX_EDGE) -> tuple[np.ndarray, float]:
+def _small(image: np.ndarray, max_edge: int = _MAX_EDGE) -> tuple[np.ndarray, float, float]:
+    """Downscale uniformly; return image and actual per-axis scales (out/src)."""
     h, w = image.shape[:2]
     long_edge = max(h, w)
     if long_edge <= max_edge:
-        return image, 1.0
+        return image, 1.0, 1.0
     scale = max_edge / long_edge
-    out = cv2.resize(image, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_LINEAR)
-    return out, scale
+    nw = max(1, int(round(w * scale)))
+    nh = max(1, int(round(h * scale)))
+    out = cv2.resize(image, (nw, nh), interpolation=cv2.INTER_LINEAR)
+    return out, nw / float(w), nh / float(h)
 
 
 def _angle_list(span: int, step: float) -> list[float]:
@@ -82,9 +76,7 @@ def _angle_list(span: int, step: float) -> list[float]:
         return [0.0]
     step = max(0.5, float(step or 2.0))
     values = list(np.arange(-span, span + 1e-6, step))
-    # Prefer 0 first for early-ish high-confidence hits, then denser sweep.
     ordered = [0.0] + [float(a) for a in values if abs(float(a)) > 1e-6]
-    # Deduplicate while preserving order
     seen: set[float] = set()
     out: list[float] = []
     for a in ordered:
@@ -110,6 +102,26 @@ def _match_template(search: np.ndarray, templ: np.ndarray, opencl: bool) -> tupl
         result = cv2.matchTemplate(search, templ, cv2.TM_CCOEFF_NORMED)
     _, value, _, loc = cv2.minMaxLoc(result)
     return float(value), int(loc[0]), int(loc[1])
+
+
+def _oriented_corners_small(cx: float, cy: float, mw: float, mh: float, angle_deg: float) -> np.ndarray:
+    """Model corners in the downscaled search coordinate system (getRotationMatrix2D convention)."""
+    rad = np.deg2rad(float(angle_deg))
+    cos_a, sin_a = np.cos(rad), np.sin(rad)
+    hw, hh = float(mw) / 2.0, float(mh) / 2.0
+    local = ((-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh))
+    return np.array(
+        [[cx + cos_a * lx + sin_a * ly, cy - sin_a * lx + cos_a * ly] for lx, ly in local],
+        dtype=np.float64,
+    )
+
+
+def _map_points_to_full(pts_small: np.ndarray, x0: int, y0: int, sx: float, sy: float) -> np.ndarray:
+    """Map search-space points to full-image pixels using actual resize scales."""
+    out = np.empty_like(pts_small)
+    out[:, 0] = x0 + pts_small[:, 0] / sx
+    out[:, 1] = y0 + pts_small[:, 1] / sy
+    return out
 
 
 class ShapeSearchTool(Tool):
@@ -192,7 +204,6 @@ class ShapeSearchTool(Tool):
         accel = resolve_accel(cfg.get("accel_device") or "cpu")
         opencl = use_opencl(cfg.get("accel_device"))
         model = self._load_model(project_id, tool.get("id", ""))
-        view = image
         if model is None:
             return {
                 "id": tool.get("id"),
@@ -204,51 +215,62 @@ class ShapeSearchTool(Tool):
                 "accel": accel.get("id", "cpu"),
                 "message": "Model image is not saved. Register a pattern on the Model tab.",
                 "elapsed_ms": (time.perf_counter() - started) * 1000.0,
-            }, view
+            }, image
 
         x0, y0, x1, y1 = _roi_box(image, cfg.get("search_roi"))
-        small, scale = _small(image[y0:y1, x0:x1])
+        roi = image[y0:y1, x0:x1]
+        small, sx, sy = _small(roi)
         gray_search = _gray(small)
-        model_small, model_scale = _small(model, max(8, int(max(model.shape[:2]) * scale)))
+        # Scale model with the same nominal factor as the search ROI long-edge shrink.
+        nom = min(sx, sy)
+        model_cap = max(8, int(round(max(model.shape[:2]) * nom)))
+        model_small, msx, msy = _small(model, model_cap)
         gray_model = _gray(model_small)
         sh, sw = gray_search.shape[:2]
         mh, mw = gray_model.shape[:2]
         if mh >= sh or mw >= sw:
             gray_model = cv2.resize(gray_model, (max(1, sw // 2), max(1, sh // 2)), interpolation=cv2.INTER_LINEAR)
+            mh, mw = gray_model.shape[:2]
 
-        search_gray = gray_search
-        search_edges = _edges(search_gray)
+        search_edges = _edges(gray_search)
         span = int(cfg.get("angle_range") or 0)
         step = float(cfg.get("angle_step") or 2)
         angles = _angle_list(span, step)
-        inv = 1.0 / scale
-        # Outline uses the registered model pixel size (not the padded rotated AABB).
-        model_w = float(model.shape[1])
-        model_h = float(model.shape[0])
 
         best = None
         for angle in angles:
             templ_gray = _rotate(gray_model, angle)
-            if templ_gray.shape[0] >= search_gray.shape[0] or templ_gray.shape[1] >= search_gray.shape[1]:
+            if templ_gray.shape[0] >= gray_search.shape[0] or templ_gray.shape[1] >= gray_search.shape[1]:
                 continue
-            # Edge match is more robust when the scene object is rotated relative to the model.
             score_e, px_e, py_e = _match_template(search_edges, _edges(templ_gray), opencl)
-            score_g, px_g, py_g = _match_template(search_gray, templ_gray, opencl)
+            score_g, px_g, py_g = _match_template(gray_search, templ_gray, opencl)
             if score_e >= score_g:
                 score, px, py, templ = score_e, px_e, py_e, templ_gray
             else:
                 score, px, py, templ = score_g, px_g, py_g, templ_gray
             score = max(0.0, float(score))
-            if best is None or score > best["confidence"]:
-                # Center of the rotated template AABB maps back to the model center.
-                best = {
-                    "confidence": score,
-                    "x": x0 + (px + templ.shape[1] / 2.0) * inv,
-                    "y": y0 + (py + templ.shape[0] / 2.0) * inv,
-                    "width": model_w,
-                    "height": model_h,
-                    "angle": float(angle),
-                }
+            if best is not None and score <= best["confidence"]:
+                continue
+            cx_s = px + templ.shape[1] / 2.0
+            cy_s = py + templ.shape[0] / 2.0
+            # Corners in search space from the same model used to match, then map with real sx/sy.
+            pts_s = _oriented_corners_small(cx_s, cy_s, float(mw), float(mh), angle)
+            pts = _map_points_to_full(pts_s, x0, y0, sx, sy)
+            tip_s = np.array(
+                [[cx_s, cy_s], [cx_s + (-mh * 0.55) * np.sin(np.deg2rad(angle)), cy_s + (-mh * 0.55) * np.cos(np.deg2rad(angle))]],
+                dtype=np.float64,
+            )
+            tip = _map_points_to_full(tip_s, x0, y0, sx, sy)
+            best = {
+                "confidence": score,
+                "x": float(pts[:, 0].mean()),
+                "y": float(pts[:, 1].mean()),
+                "width": float(mw) / sx,
+                "height": float(mh) / sy,
+                "angle": float(angle),
+                "box": pts.tolist(),
+                "tip": tip.tolist(),
+            }
 
         elapsed = (time.perf_counter() - started) * 1000.0
         found = best is not None and best["confidence"] > 0
@@ -275,6 +297,7 @@ class ShapeSearchTool(Tool):
             "height": best["height"],
             "confidence": best["confidence"],
             "shape": "model",
+            "box": best["box"],
         }
         overlay = self._draw_hit(image, best, passed)
         return {
@@ -290,6 +313,7 @@ class ShapeSearchTool(Tool):
             "angle": round(best["angle"], 1),
             "width": round(best["width"], 1),
             "height": round(best["height"], 1),
+            "box": [[round(p[0], 1), round(p[1], 1)] for p in best["box"]],
             "pose": pose,
             "message": f"Pattern  confidence {best['confidence'] * 100:.1f}%  ∠{best['angle']:.1f}°",
             "elapsed_ms": elapsed,
@@ -297,29 +321,23 @@ class ShapeSearchTool(Tool):
 
     @staticmethod
     def _draw_hit(image: np.ndarray, found: dict, passed: bool) -> np.ndarray:
-        from app.core.engine import _oriented_rect_points
-
         view = image.copy()
         color = (40, 220, 160) if passed else (60, 60, 230)
         thick = max(2, int(round(min(view.shape[:2]) / 320)))
-        cx, cy = float(found["x"]), float(found["y"])
-        rw, rh = float(found["width"]), float(found["height"])
-        angle = float(found["angle"])
-        pts = _oriented_rect_points(cx, cy, rw, rh, angle)
+        pts = np.asarray(found["box"], dtype=np.float64)
         cv2.polylines(view, [np.int32(np.round(pts))], True, color, thick, cv2.LINE_AA)
-        rad = np.deg2rad(angle)
-        tip = (cx - rh * 0.55 * np.sin(rad), cy - rh * 0.55 * np.cos(rad))
-        cv2.line(
-            view,
-            (int(round(cx)), int(round(cy))),
-            (int(round(tip[0])), int(round(tip[1]))),
-            color,
-            thick,
-            cv2.LINE_AA,
-        )
-        cv2.drawMarker(view, (int(round(cx)), int(round(cy))), color, cv2.MARKER_CROSS, 16, thick)
-        label = f"{found['confidence'] * 100:.0f}%  {angle:.1f} deg"
-        lx, ly = int(round(cx) + 10), int(round(cy) - 12)
+        tip = np.asarray(found.get("tip") or [], dtype=np.float64)
+        if tip.shape == (2, 2):
+            p0 = (int(round(tip[0, 0])), int(round(tip[0, 1])))
+            p1 = (int(round(tip[1, 0])), int(round(tip[1, 1])))
+            cv2.line(view, p0, p1, color, thick, cv2.LINE_AA)
+            cv2.drawMarker(view, p0, color, cv2.MARKER_CROSS, 16, thick)
+        else:
+            cx, cy = int(round(found["x"])), int(round(found["y"]))
+            cv2.drawMarker(view, (cx, cy), color, cv2.MARKER_CROSS, 16, thick)
+        label = f"{found['confidence'] * 100:.0f}%  {found['angle']:.1f} deg"
+        lx = int(round(found["x"])) + 10
+        ly = int(round(found["y"])) - 12
         cv2.putText(view, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (20, 20, 20), 3, cv2.LINE_AA)
         cv2.putText(view, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA)
         return view
