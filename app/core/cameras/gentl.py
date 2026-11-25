@@ -296,47 +296,102 @@ class GenTLBackend(CameraBackend):
             self._last_grab_ms = (time.perf_counter() - started) * 1000.0
             return frame
 
-    def grab_fresh(self, discard: int = 2) -> np.ndarray:
-        """Drop buffered frames, optionally software-trigger, then grab current scene."""
+    def grab_fresh(self, discard: int = 1) -> np.ndarray:
+        """Wait for complete frame(s), drop stale ones, return a full current image."""
         with self._lock:
             started = time.perf_counter()
             self._ensure_open()
-            assert self._stream is not None and self._event_manager is not None
+            # Drop one stale free-run frame, then take the next full frame.
             for _ in range(max(0, int(discard))):
                 try:
-                    self._event_manager.update_event_data(1)
-                    self._stream.queue_buffer(self._event_manager.buffer)
+                    buf = self._wait_buffer(timeout_ms=800)
+                    self._stream.queue_buffer(buf)
                 except Exception:
                     break
-            if self._node_map is not None and hasattr(self._node_map, "TriggerSoftware"):
-                try:
-                    self._node_map.TriggerSoftware.execute()
-                except Exception:
-                    pass
             frame = self._grab_unlocked(ensure=False)
             self._last_grab_ms = (time.perf_counter() - started) * 1000.0
             return frame
+
+    def _buffer_looks_incomplete(self, buffer) -> bool:
+        """True only when GenTL clearly reports a bad transfer."""
+        try:
+            if hasattr(buffer, "_is_incomplete") and buffer._is_incomplete():
+                return True
+        except Exception:
+            pass
+        try:
+            delivered_h = int(getattr(buffer, "delivered_image_height", 0) or 0)
+            if delivered_h > 0 and self._height > 0 and delivered_h < int(self._height * 0.9):
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _frame_is_thin_line(self, mono: np.ndarray) -> bool:
+        row_energy = mono.mean(axis=1)
+        lit_rows = int(np.count_nonzero(row_energy > 1.0))
+        # All-dark full frames are OK; a few lit rows is the classic GigE tear.
+        return lit_rows > 0 and lit_rows < max(8, mono.shape[0] // 20)
+
+    def _wait_buffer(self, timeout_ms: int = 5000):
+        assert self._stream is not None and self._event_manager is not None
+        deadline = time.perf_counter() + max(0.05, timeout_ms / 1000.0)
+        last_err: Exception | None = None
+        while time.perf_counter() < deadline:
+            remaining = max(1, int((deadline - time.perf_counter()) * 1000))
+            try:
+                self._event_manager.update_event_data(remaining)
+            except Exception as exc:
+                last_err = exc
+                # Event timeout — keep waiting until overall deadline.
+                continue
+            buffer = self._event_manager.buffer
+            if self._buffer_looks_incomplete(buffer):
+                try:
+                    self._stream.queue_buffer(buffer)
+                except Exception:
+                    pass
+                continue
+            return buffer
+        if last_err is not None:
+            raise RuntimeError(f"GenTL grab timed out ({last_err})")
+        raise RuntimeError("GenTL grab timed out.")
 
     def _grab_unlocked(self, *, ensure: bool = True) -> np.ndarray:
         if ensure:
             self._ensure_open()
         assert self._stream is not None and self._event_manager is not None
-        self._event_manager.update_event_data(5000)
-        buffer = self._event_manager.buffer
-        ctx = buffer.context
-        if isinstance(ctx, int) and 0 <= ctx < len(self._keep):
-            data = self._keep[ctx]
-        else:
-            data = bytes(buffer.raw_buffer)
-        mono = np.frombuffer(data, dtype=np.uint8, count=self._width * self._height).reshape(
-            self._height, self._width
+        need = self._width * self._height
+        last_thin = None
+        for _ in range(6):
+            buffer = self._wait_buffer(5000)
+            raw = bytes(buffer.raw_buffer)
+            if len(raw) < need:
+                try:
+                    self._stream.queue_buffer(buffer)
+                except Exception:
+                    pass
+                continue
+            mono = np.frombuffer(raw, dtype=np.uint8, count=need).reshape(self._height, self._width)
+            if self._frame_is_thin_line(mono):
+                last_thin = mono
+                try:
+                    self._stream.queue_buffer(buffer)
+                except Exception:
+                    pass
+                continue
+            frame = _to_bgr(mono.copy(), self._pixel_format)
+            try:
+                self._stream.queue_buffer(buffer)
+            except Exception:
+                pass
+            return frame
+        if last_thin is not None:
+            # Prefer a late thin frame over failing Measure entirely.
+            return _to_bgr(last_thin.copy(), self._pixel_format)
+        raise RuntimeError(
+            "GenTL could not deliver a full frame. Check NIC link speed and disable jumbo frames."
         )
-        frame = _to_bgr(mono.copy(), self._pixel_format)
-        try:
-            self._stream.queue_buffer(buffer)
-        except Exception:
-            pass
-        return frame
 
     def close(self) -> None:
         with self._lock:
@@ -476,9 +531,27 @@ class GenTLBackend(CameraBackend):
                 node_map.TriggerMode.value = "Off"
             except Exception:
                 pass
+        # Jumbo 9000 without matching NIC/switch MTU causes packet loss → thin-line frames.
+        # Stay on standard Ethernet payload size unless the camera already uses a smaller value.
         if hasattr(node_map, "GevSCPSPacketSize"):
             try:
-                node_map.GevSCPSPacketSize.value = min(9000, int(node_map.GevSCPSPacketSize.max))
+                current = int(node_map.GevSCPSPacketSize.value)
+                maximum = int(node_map.GevSCPSPacketSize.max)
+                minimum = int(getattr(node_map.GevSCPSPacketSize, "min", 576) or 576)
+                safe = min(1500, maximum)
+                safe = max(minimum, safe)
+                if current > 1600 or current < minimum:
+                    node_map.GevSCPSPacketSize.value = safe
+            except Exception:
+                pass
+        if hasattr(node_map, "GevSCPD"):
+            try:
+                # Small inter-packet delay reduces loss on busy Intel NICs.
+                delay = int(node_map.GevSCPD.value)
+                if delay < 100:
+                    lo = int(getattr(node_map.GevSCPD, "min", 0) or 0)
+                    hi = int(getattr(node_map.GevSCPD, "max", 10000) or 10000)
+                    node_map.GevSCPD.value = min(hi, max(lo, 1000))
             except Exception:
                 pass
 
@@ -486,7 +559,8 @@ class GenTLBackend(CameraBackend):
         stream.open(list(device.data_stream_ids)[0])
         handles: list = []
         keep: list[bytes] = []
-        for index in range(4):
+        # More queued buffers absorb GigE jitter without dropping to incomplete frames.
+        for index in range(8):
             raw = bytes(payload)
             keep.append(raw)
             handle = stream.announce_buffer(BufferToken(raw, index))
