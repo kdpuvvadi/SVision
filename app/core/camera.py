@@ -55,6 +55,14 @@ class ImageSource:
     def grab(self) -> np.ndarray:
         return self._backend.grab()
 
+    @property
+    def last_grab_ms(self) -> float:
+        return float(getattr(self._backend, "_last_grab_ms", 0.0) or 0.0)
+
+    @property
+    def last_open_ms(self) -> float:
+        return float(getattr(self._backend, "_last_open_ms", 0.0) or 0.0)
+
     def close(self) -> None:
         self._backend.close()
 
@@ -76,12 +84,19 @@ def camera_from_project(project: dict) -> ImageSource:
 
 
 class _CameraSession:
-    """Reuse one live backend while the Camera tool config stays the same."""
+    """Reuse live backends across measures.
+
+    PLC ready-polling can touch a different production scene every few hundred ms.
+    A single global slot would close the GenTL session each time and force an
+    ~1–8 s reopen on the next Measure. Keep one backend per config key; only
+    evict other exclusive USB/GenTL sessions when opening a conflicting live cam.
+    """
+
+    _EXCLUSIVE = frozenset({"usb", "gige", "gentl"})
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
-        self._key: tuple | None = None
-        self._source: ImageSource | None = None
+        self._sessions: dict[tuple, ImageSource] = {}
 
     @staticmethod
     def _config_key(source: str, config: dict[str, Any]) -> tuple:
@@ -92,20 +107,24 @@ class _CameraSession:
         cfg = dict(config or {})
         key = self._config_key(source, cfg)
         with self._lock:
-            if self._source is not None and self._key == key:
-                return self._source
-            if self._source is not None:
-                self._source.close()
-            self._source = ImageSource(source=source, config=cfg)
-            self._key = key
-            return self._source
+            hit = self._sessions.get(key)
+            if hit is not None:
+                return hit
+            resolved = resolve_source(source)
+            if resolved in self._EXCLUSIVE:
+                for other_key, session in list(self._sessions.items()):
+                    if other_key[0] in self._EXCLUSIVE:
+                        session.close()
+                        del self._sessions[other_key]
+            created = ImageSource(source=source, config=cfg)
+            self._sessions[key] = created
+            return created
 
     def close(self) -> None:
         with self._lock:
-            if self._source is not None:
-                self._source.close()
-            self._source = None
-            self._key = None
+            for session in self._sessions.values():
+                session.close()
+            self._sessions.clear()
 
 
 camera_session = _CameraSession()

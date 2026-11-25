@@ -147,11 +147,13 @@ class MeasureService:
         source = job.source
         stored = current_images.read(job.project_id)
         if source == "auto":
-            # Prefer the selected/stored image until a live camera is actually connected.
-            if stored:
-                source = "stored"
-            elif cam.source in {"usb", "gige", "gentl"} and cam.status().connected:
+            # Live cameras always grab a fresh frame. Preferring leftover stored
+            # images here made GenTL Measure look "instant" while showing an old
+            # picture. Upload mode still uses the chosen files.
+            if cam.source in {"usb", "gige", "gentl"}:
                 source = "live"
+            elif stored:
+                source = "stored"
             else:
                 source = "stored"
 
@@ -169,8 +171,22 @@ class MeasureService:
             }
 
         if source == "live":
+            grab_started = time.perf_counter()
             frame = cam.grab()
+            grab_ms = (time.perf_counter() - grab_started) * 1000.0
+            print(
+                f"[Measure] live grab {grab_ms:.1f} ms "
+                f"(open={getattr(cam, 'last_open_ms', 0):.0f} ms source={cam.source})",
+                flush=True,
+            )
             item = inspect_array(job.project_id, frame, f"live-{cam.source}")
+            # CameraTool.run() only times metadata on an already-grabbed frame; fold
+            # the real acquisition time into the camera step and overall elapsed.
+            item["elapsed_ms"] = float(item.get("elapsed_ms") or 0) + grab_ms
+            for tool in item.get("tools") or []:
+                if tool.get("type") == "camera":
+                    tool["elapsed_ms"] = float(tool.get("elapsed_ms") or 0) + grab_ms
+                    break
             return {
                 "count": 1,
                 "ok": 1 if item.get("judgment") == "OK" else 0,

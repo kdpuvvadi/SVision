@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,12 @@ _DEFAULT_CTI_HINTS = [
     Path(r"C:\Program Files\Common Files\Sentech\GenTL"),
     Path(r"C:\Program Files\Sentech\GenTL"),
 ]
+# Full GigE discovery can sit on GenTL timeouts for many seconds. Prefer short waits
+# when we already know the device id / IP from Connect → Scan.
+_IFACE_TIMEOUT_MS = 800
+_DEVICE_TIMEOUT_MS = 1200
+_IFACE_TIMEOUT_KNOWN_MS = 250
+_DEVICE_TIMEOUT_KNOWN_MS = 400
 
 
 def _make_genapi_port(gentl_port):
@@ -258,6 +265,7 @@ class GenTLBackend(CameraBackend):
         self._device = None
         self._stream = None
         self._node_map = None
+        self._event_manager = None
         self._handles: list = []
         self._keep: list[bytes] = []
         self._acquiring = False
@@ -266,6 +274,8 @@ class GenTLBackend(CameraBackend):
         self._pixel_format = "Mono8"
         self._payload = 0
         self._label = ""
+        self._last_open_ms = 0.0
+        self._last_grab_ms = 0.0
 
     def status(self) -> CameraStatus:
         with self._lock:
@@ -281,13 +291,11 @@ class GenTLBackend(CameraBackend):
 
     def grab(self) -> np.ndarray:
         with self._lock:
+            started = time.perf_counter()
             self._ensure_open()
-            assert self._stream is not None and self._node_map is not None
-            from genicam.gentl import EVENT_TYPE_LIST, EventManagerNewBuffer
-
-            manager = EventManagerNewBuffer(self._stream.register_event(EVENT_TYPE_LIST.EVENT_NEW_BUFFER))
-            manager.update_event_data(5000)
-            buffer = manager.buffer
+            assert self._stream is not None and self._event_manager is not None
+            self._event_manager.update_event_data(5000)
+            buffer = self._event_manager.buffer
             ctx = buffer.context
             if isinstance(ctx, int) and 0 <= ctx < len(self._keep):
                 data = self._keep[ctx]
@@ -301,6 +309,7 @@ class GenTLBackend(CameraBackend):
                 self._stream.queue_buffer(buffer)
             except Exception:
                 pass
+            self._last_grab_ms = (time.perf_counter() - started) * 1000.0
             return frame
 
     def close(self) -> None:
@@ -308,7 +317,12 @@ class GenTLBackend(CameraBackend):
             self._safe_close()
 
     def _ensure_open(self) -> None:
-        if self._acquiring and self._device is not None and self._device.is_open():
+        if (
+            self._acquiring
+            and self._device is not None
+            and self._device.is_open()
+            and self._event_manager is not None
+        ):
             return
         self._safe_close()
         self._open_session()
@@ -317,27 +331,34 @@ class GenTLBackend(CameraBackend):
         from genicam.gentl import (
             ACQ_START_FLAGS_LIST,
             DEVICE_ACCESS_FLAGS_LIST as DAF,
+            EVENT_TYPE_LIST,
             BufferToken,
             DataStream,
+            EventManagerNewBuffer,
             GenTLProducer,
         )
 
         if not Path(self.cti_path).is_file():
             raise FileNotFoundError(f"CTI file not found: {self.cti_path}")
 
+        open_started = time.perf_counter()
+        wanted = (self.device_id or "").strip()
+        want_ip = (self.gige_ip or "").strip()
+        known = bool(wanted or want_ip)
+        iface_timeout = _IFACE_TIMEOUT_KNOWN_MS if known else _IFACE_TIMEOUT_MS
+        device_timeout = _DEVICE_TIMEOUT_KNOWN_MS if known else _DEVICE_TIMEOUT_MS
+
         producer = GenTLProducer.create_producer()
         producer.open(self.cti_path)
         system = producer.create_system()
         system.open()
-        system.update_interface_info_list(3000)
+        system.update_interface_info_list(iface_timeout)
 
-        wanted = self.device_id
-        want_ip = self.gige_ip.strip()
         found: list[tuple[Any, Any, str]] = []
         for iface_info in system.interface_info_list:
             candidate = iface_info.create_interface()
             candidate.open()
-            candidate.update_device_info_list(4000)
+            candidate.update_device_info_list(device_timeout)
             matched = False
             for info in candidate.device_info_list:
                 device_id = str(getattr(info, "id_", "") or "")
@@ -450,6 +471,7 @@ class GenTLBackend(CameraBackend):
         if hasattr(node_map, "TLParamsLocked"):
             node_map.TLParamsLocked.value = 1
         node_map.AcquisitionStart.execute()
+        event_manager = EventManagerNewBuffer(stream.register_event(EVENT_TYPE_LIST.EVENT_NEW_BUFFER))
 
         self._producer = producer
         self._system = system
@@ -457,6 +479,7 @@ class GenTLBackend(CameraBackend):
         self._device = device
         self._stream = stream
         self._node_map = node_map
+        self._event_manager = event_manager
         self._handles = handles
         self._keep = keep
         self._acquiring = True
@@ -465,12 +488,21 @@ class GenTLBackend(CameraBackend):
         self._pixel_format = pixel
         self._payload = payload
         self._label = display
+        self._last_open_ms = (time.perf_counter() - open_started) * 1000.0
         if not self.device_id:
             self.device_id = str(getattr(target, "id_", "") or "")
+        print(
+            f"[GenTL] open {self._last_open_ms:.0f} ms device={self._label or self.device_id}",
+            flush=True,
+        )
 
     def _safe_close(self) -> None:
         from contextlib import suppress
 
+        with suppress(Exception):
+            if self._event_manager is not None:
+                self._event_manager.unregister_event()
+        self._event_manager = None
         with suppress(Exception):
             if self._node_map is not None and hasattr(self._node_map, "AcquisitionStop"):
                 self._node_map.AcquisitionStop.execute()
