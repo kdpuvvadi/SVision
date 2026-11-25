@@ -27,5 +27,13 @@ call ".venv\Scripts\activate.bat"
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 echo.
-echo Installed. Start the server with run.bat
+echo Installed.
+set /p RUN_NOW="Start SVision now with run.bat? [y/N] "
+if /i "%RUN_NOW%"=="y" goto run_app
+if /i "%RUN_NOW%"=="yes" goto run_app
+echo Start later with run.bat
 pause
+exit /b 0
+
+:run_app
+call "%~dp0run.bat"
