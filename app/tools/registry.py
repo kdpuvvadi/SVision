@@ -17,33 +17,40 @@
 
 from __future__ import annotations
 
+import importlib
+import pkgutil
 import uuid
+from typing import Any
 
 from app.tools.base import Tool
-from app.tools.camera import CameraTool
-from app.tools.classify import ClassifyTool
-from app.tools.code import CodeTool
-from app.tools.ocr import OcrTool
-from app.tools.position_compensation import PositionCompensationTool
-from app.tools.robotic import RoboticTool
-from app.tools.shape_search import ShapeSearchTool
 
 _TOOLS: dict[str, Tool] = {}
+_DISCOVERED = False
+_SKIP_MODULES = {"base", "registry", "__init__"}
 
 
-def register(tool: Tool) -> None:
+def register(tool: Tool) -> Tool:
+    if not tool.type:
+        raise ValueError("Tool.type is required")
     _TOOLS[tool.type] = tool
+    return tool
 
 
 def get_tool(tool_type: str) -> Tool:
+    discover()
     tool = _TOOLS.get(tool_type)
     if tool is None:
         raise KeyError(f"Unknown tool: {tool_type}")
     return tool
 
 
+def all_tools() -> list[Tool]:
+    discover()
+    return list(_TOOLS.values())
+
+
 def catalog() -> list[dict]:
-    return [tool.catalog() for tool in _TOOLS.values()]
+    return [tool.catalog() for tool in all_tools()]
 
 
 def new_tool(tool_type: str, name: str | None = None) -> dict:
@@ -72,10 +79,45 @@ def normalize_config(tool: dict) -> dict:
     }
 
 
-register(CameraTool())
-register(ShapeSearchTool())
-register(PositionCompensationTool())
-register(ClassifyTool())
-register(OcrTool())
-register(CodeTool())
-register(RoboticTool())
+def mount_all(app: Any) -> None:
+    for tool in all_tools():
+        tool.mount(app)
+
+
+def notify_project_updated(project: dict[str, Any]) -> None:
+    for tool in all_tools():
+        try:
+            tool.on_project_updated(project)
+        except Exception:
+            pass
+
+
+def notify_project_deleted(project_id: str, tools: list[dict[str, Any]]) -> None:
+    for tool in all_tools():
+        try:
+            tool.on_project_deleted(project_id, tools)
+        except Exception:
+            pass
+
+
+def notify_measure_done(project_id: str, result: dict[str, Any]) -> None:
+    for tool in all_tools():
+        try:
+            tool.on_measure_done(project_id, result)
+        except Exception:
+            pass
+
+
+def discover() -> None:
+    """Import every app.tools.* module so tools can self-register."""
+    global _DISCOVERED
+    if _DISCOVERED:
+        return
+    _DISCOVERED = True
+    import app.tools as tools_pkg
+
+    for module in pkgutil.iter_modules(tools_pkg.__path__):
+        name = module.name
+        if name in _SKIP_MODULES or name.startswith("_") or name.endswith("_routes"):
+            continue
+        importlib.import_module(f"app.tools.{name}")

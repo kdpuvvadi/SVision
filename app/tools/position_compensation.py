@@ -24,6 +24,7 @@ import numpy as np
 
 from app.core.features import _roi_box
 from app.tools.base import Tool
+from app.tools.registry import register
 
 
 def _crop(image: np.ndarray, x0: int, y0: int, x1: int, y1: int) -> np.ndarray:
@@ -38,6 +39,7 @@ def _crop(image: np.ndarray, x0: int, y0: int, x1: int, y1: int) -> np.ndarray:
 class PositionCompensationTool(Tool):
     type = "position_compensation"
     title = "Position Compensation"
+    ui_modules = ["/static/tools/position_compensation.js"]
     summary = "Crop the image to the selected region so later tools see fewer pixels."
     transforms_image = True
 
@@ -138,3 +140,6 @@ class PositionCompensationTool(Tool):
             "message": f"Crop {cropped.shape[1]}×{cropped.shape[0]}  {after}/{before} px  {followed}",
             "elapsed_ms": elapsed,
         }, preview
+
+
+register(PositionCompensationTool())

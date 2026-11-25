@@ -22,6 +22,7 @@ import time
 import numpy as np
 
 from app.tools.base import Tool
+from app.tools.registry import register
 
 
 class CameraTool(Tool):
@@ -29,6 +30,9 @@ class CameraTool(Tool):
     title = "Camera"
     summary = "Image source for this flow. Upload, USB, or GigE GenTL (.cti) cameras."
     singleton = True
+    role = "input"
+    placement = "prepend"
+    ui_modules = ["/static/tools/camera.js"]
 
     def fields(self) -> list[dict]:
         return [
@@ -80,11 +84,10 @@ class CameraTool(Tool):
     def status(self) -> str:
         return "Upload for offline checks. USB or GigE GenTL for live PLC measure."
 
-    def catalog(self) -> dict:
-        data = super().catalog()
-        data["singleton"] = True
-        data["role"] = "input"
-        return data
+    def mount(self, app) -> None:
+        from app.tools import camera_routes
+
+        camera_routes.mount(app)
 
     def run(self, image: np.ndarray, tool: dict, project_id: str, ctx: dict | None = None) -> tuple[dict, np.ndarray | None]:
         started = time.perf_counter()
@@ -137,3 +140,6 @@ class CameraTool(Tool):
             "source": source,
             "elapsed_ms": (time.perf_counter() - started) * 1000.0,
         }, None
+
+
+register(CameraTool())

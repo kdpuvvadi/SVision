@@ -21,12 +21,14 @@ import numpy as np
 
 from app.core.ocr_tool import ocr_available, read_text
 from app.tools.base import Tool
+from app.tools.registry import register
 
 
 class OcrTool(Tool):
     type = "ocr"
     title = "OCR"
     summary = "Read text only inside the drawn region."
+    ui_modules = ["/static/tools/ocr.js"]
 
     def fields(self) -> list[dict]:
         return [
@@ -57,3 +59,6 @@ class OcrTool(Tool):
         result = read_text(image, cfg.get("roi"), cfg.get("expected") or "", cfg.get("match_mode") or "contains")
         result.update({"id": tool.get("id"), "type": self.type, "name": tool.get("name") or self.title})
         return result, None
+
+
+register(OcrTool())

@@ -21,12 +21,14 @@ import numpy as np
 
 from app.core.code_tool import code_types, read_codes, reader_available
 from app.tools.base import Tool
+from app.tools.registry import register
 
 
 class CodeTool(Tool):
     type = "code"
     title = "Code Read"
     summary = "Read the selected code type in this tool's region."
+    ui_modules = ["/static/tools/code.js"]
 
     def fields(self) -> list[dict]:
         return [
@@ -53,3 +55,6 @@ class CodeTool(Tool):
         result = read_codes(image, cfg.get("roi"), cfg.get("expected") or "", cfg.get("symbology") or "auto")
         result.update({"id": tool.get("id"), "type": self.type, "name": tool.get("name") or self.title})
         return result, None
+
+
+register(CodeTool())

@@ -265,7 +265,7 @@ class ProjectStore:
             if getattr(spec, "singleton", False) and any(item.get("type") == tool_type for item in tools):
                 raise ValueError(f"{spec.title} is already in the flow.")
             tool = new_tool(tool_type)
-            if tool_type == "camera":
+            if getattr(spec, "placement", "append") == "prepend":
                 tools.insert(0, tool)
             else:
                 tools.append(tool)

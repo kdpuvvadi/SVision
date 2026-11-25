@@ -123,9 +123,9 @@ class MeasureService:
             else:
                 handshake.finish_ng(elapsed, result, result.get("message") or "NG")
             try:
-                from app.core.robot_stream import robot_stream
+                from app.tools.registry import notify_measure_done
 
-                robot_stream.publish_from_measure(job.project_id, result)
+                notify_measure_done(job.project_id, result)
             except Exception:
                 pass
             print(

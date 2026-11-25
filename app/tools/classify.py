@@ -21,12 +21,14 @@ import numpy as np
 
 from app.core.features import difference_map
 from app.tools.base import Tool
+from app.tools.registry import register
 
 
 class ClassifyTool(Tool):
     type = "classify"
     title = "ML Judgment"
     summary = "OK or NG from this tool's own samples."
+    ui_modules = ["/static/tools/classify.js"]
 
     def fields(self) -> list[dict]:
         return [
@@ -44,8 +46,16 @@ class ClassifyTool(Tool):
     def panels(self) -> list[str]:
         return ["samples"]
 
+    def panel_labels(self) -> dict[str, str]:
+        return {"samples": "Samples"}
+
     def default_config(self) -> dict:
         return {"min_confidence": 0.55, "roi": None}
+
+    def mount(self, app) -> None:
+        from app.tools import classify_routes
+
+        classify_routes.mount(app)
 
     def run(self, image: np.ndarray, tool: dict, project_id: str, ctx: dict | None = None) -> tuple[dict, np.ndarray | None]:
         from app.storage.store import store
@@ -71,3 +81,6 @@ class ClassifyTool(Tool):
             "message": "",
         }
         return result, overlay
+
+
+register(ClassifyTool())

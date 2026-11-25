@@ -86,18 +86,15 @@ class RobotStreamHub:
             cfg_by_id = {
                 t.get("id"): (t.get("config") or {})
                 for t in (project.get("flow") or {}).get("tools") or []
-                if t.get("type") == "robotic"
             }
         except Exception:
             cfg_by_id = {}
         for item in result.get("results") or [result]:
             for tool in item.get("tools") or []:
-                if tool.get("type") != "robotic":
-                    continue
                 tid = tool.get("id") or ""
                 if not tid:
                     continue
-                mode = str((cfg_by_id.get(tid) or {}).get("stream_mode") or "on_trigger")
+                mode = str((cfg_by_id.get(tid) or {}).get("stream_mode") or "")
                 if mode != "on_trigger":
                     continue
                 self.broadcast_text(
@@ -152,10 +149,8 @@ class RobotStreamHub:
         pid = project.get("id") or ""
         wanted: set[str] = set()
         for tool in (project.get("flow") or {}).get("tools") or []:
-            if tool.get("type") != "robotic":
-                continue
             cfg = tool.get("config") or {}
-            if str(cfg.get("stream_mode") or "on_trigger") != "continuous":
+            if str(cfg.get("stream_mode") or "") != "continuous":
                 continue
             tid = tool.get("id") or ""
             wanted.add(self.key(pid, tid))
@@ -171,10 +166,9 @@ class RobotStreamHub:
         from app.core.camera import camera_from_project
         from app.core.engine import decode_image
         from app.storage.store import current_images, store
-        from app.tools.robotic import RoboticTool
+        from app.tools.registry import get_tool
 
         period = 1.0 / hz
-        robotic = RoboticTool()
         while not stop.is_set():
             started = time.perf_counter()
             try:
@@ -183,7 +177,11 @@ class RobotStreamHub:
                     (t for t in (project.get("flow") or {}).get("tools") or [] if t.get("id") == tool_id),
                     None,
                 )
-                if not tool or tool.get("type") != "robotic":
+                if not tool:
+                    break
+                try:
+                    robotic = get_tool(tool.get("type") or "")
+                except KeyError:
                     break
                 cfg = tool.get("config") or {}
                 if str(cfg.get("stream_mode") or "") != "continuous":

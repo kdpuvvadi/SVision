@@ -112,8 +112,15 @@ def _tool_preview(image: np.ndarray | None, result: dict, mark: bool, roi: dict 
     return encode_jpeg(view, 70)
 
 
+def _is_input_tool(spec: dict) -> bool:
+    try:
+        return get_tool(spec.get("type") or "").role == "input"
+    except KeyError:
+        return False
+
+
 def _step_image(spec: dict, source: np.ndarray, seen: np.ndarray, heat: np.ndarray | None) -> np.ndarray | None:
-    if spec.get("type") == "camera":
+    if _is_input_tool(spec):
         return source
     if heat is not None:
         return heat
@@ -154,9 +161,9 @@ def _run_one(project_id: str, image: np.ndarray, tool: dict, ctx: dict) -> tuple
     return module.run(image, tool, project_id, ctx)
 
 
-def _camera_tool(project: dict) -> dict | None:
+def _input_tool(project: dict) -> dict | None:
     for tool in (project.get("flow") or {}).get("tools", []):
-        if tool.get("type") == "camera":
+        if _is_input_tool(tool):
             return tool
     return None
 
@@ -164,7 +171,7 @@ def _camera_tool(project: dict) -> dict | None:
 def inspect_array(project_id: str, image: np.ndarray, filename: str = "image") -> dict:
     started = time.perf_counter()
     project = store.get_project(project_id)
-    camera = _camera_tool(project)
+    camera = _input_tool(project)
     if camera is None:
         raise ValueError("Add a Camera tool to the flow before inspecting.")
     if image is None or getattr(image, "size", 0) == 0:
@@ -194,7 +201,7 @@ def inspect_array(project_id: str, image: np.ndarray, filename: str = "image") -
                 result, heat = future.result()
                 if result.get("pose"):
                     ctx["pose"] = result["pose"]
-                _attach_preview(result, _step_image(spec, image, seen, heat), heat is None and spec.get("type") != "camera", spec)
+                _attach_preview(result, _step_image(spec, image, seen, heat), heat is None and not _is_input_tool(spec), spec)
                 tools.append(result)
                 if heat is not None:
                     overlay = heat
@@ -202,7 +209,7 @@ def inspect_array(project_id: str, image: np.ndarray, filename: str = "image") -
             spec = active[index]
             index += 1
             result, heat = _run_one(project_id, seen, spec, ctx)
-            _attach_preview(result, _step_image(spec, image, seen, heat), heat is None and spec.get("type") != "camera", spec)
+            _attach_preview(result, _step_image(spec, image, seen, heat), heat is None and not _is_input_tool(spec), spec)
             tools.append(result)
             if ctx.get("image") is not None:
                 working = ctx["image"]

@@ -24,6 +24,7 @@ import numpy as np
 
 from app.core.features import _roi_box
 from app.tools.base import Tool
+from app.tools.registry import register
 
 
 def _preview(image: np.ndarray, limit: int = 960) -> np.ndarray:
@@ -87,6 +88,7 @@ class ShapeSearchTool(Tool):
     type = "shape_search"
     title = "Shape Search"
     summary = "Register any pattern by drawing it on the image, then search for that model."
+    ui_modules = ["/static/tools/shape_search.js"]
 
     def fields(self) -> list[dict]:
         return [
@@ -114,11 +116,19 @@ class ShapeSearchTool(Tool):
     def panels(self) -> list[str]:
         return ["shape_model"]
 
+    def panel_labels(self) -> dict[str, str]:
+        return {"shape_model": "Model"}
+
     def default_config(self) -> dict:
         return {"search_roi": None, "min_confidence": 0.6, "angle_range": "10"}
 
     def status(self) -> str:
         return "Open Model, choose an image, draw around the pattern, then Register. The pattern can be any shape."
+
+    def mount(self, app) -> None:
+        from app.tools import shape_search_routes
+
+        shape_search_routes.mount(app)
 
     def run(self, image: np.ndarray, tool: dict, project_id: str, ctx: dict | None = None) -> tuple[dict, np.ndarray | None]:
         started = time.perf_counter()
@@ -248,3 +258,6 @@ class ShapeSearchTool(Tool):
         if image is not None:
             _model_cache[key] = (stamp, image)
         return image
+
+
+register(ShapeSearchTool())

@@ -15,8 +15,10 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
-"""Independent inspection tools. Importing the package registers every module."""
+"""Independent inspection tools. Each module self-registers via discover()."""
 
-from app.tools.registry import catalog, get_tool, new_tool
+from app.tools.registry import catalog, discover, get_tool, mount_all, new_tool
 
-__all__ = ["catalog", "get_tool", "new_tool"]
+discover()
+
+__all__ = ["catalog", "discover", "get_tool", "mount_all", "new_tool"]

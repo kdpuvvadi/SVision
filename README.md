@@ -38,6 +38,17 @@ Optional, for text and 1D codes:
 
 QR reading works with the base install.
 
+## Tools (pluggable)
+
+Each inspection tool is a self-contained plugin under `app/tools/`:
+
+- Registers itself (`register(MyTool())`) — no central import list
+- Owns its HTTP routes via `mount(app)` / `*_routes.py`
+- Owns optional UI via `ui_modules` → `/static/tools/<name>.js`
+- Lifecycle hooks (`on_project_updated`, `on_measure_done`, …) keep core free of tool-specific branches
+
+Adding a tool should not require editing another tool’s module. Shared services stay in `app/core` and `app/storage`.
+
 ## Processing
 
 - Tool steps for one image (ML, OCR, code) run on separate threads.

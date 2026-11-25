@@ -24,6 +24,7 @@ import numpy as np
 
 from app.core.features import _roi_box
 from app.tools.base import Tool
+from app.tools.registry import register
 
 _MAX_EDGE = 480
 
@@ -112,6 +113,7 @@ class RoboticTool(Tool):
     type = "robotic"
     title = "Robotic"
     summary = "Detect objects for robot pick: template or contour, centers, angles, world calib, WebSocket stream."
+    ui_modules = ["/static/tools/robotic.js"]
 
     def fields(self) -> list[dict]:
         return [
@@ -197,6 +199,31 @@ class RoboticTool(Tool):
 
     def panels(self) -> list[str]:
         return ["robot_register", "robot_calib"]
+
+    def panel_labels(self) -> dict[str, str]:
+        return {"robot_register": "Register", "robot_calib": "Calibrate"}
+
+    def mount(self, app) -> None:
+        from app.tools import robotic_routes
+
+        robotic_routes.mount(app)
+
+    def on_project_updated(self, project: dict) -> None:
+        from app.core.robot_stream import robot_stream
+
+        robot_stream.sync_continuous_from_project(project)
+
+    def on_project_deleted(self, project_id: str, tools: list[dict]) -> None:
+        from app.core.robot_stream import robot_stream
+
+        for tool in tools:
+            if tool.get("type") == self.type:
+                robot_stream.stop_continuous(project_id, tool.get("id") or "")
+
+    def on_measure_done(self, project_id: str, result: dict) -> None:
+        from app.core.robot_stream import robot_stream
+
+        robot_stream.publish_from_measure(project_id, result)
 
     def default_config(self) -> dict:
         return {
@@ -400,3 +427,6 @@ class RoboticTool(Tool):
             cv2.putText(view, label, (cx + 8, cy - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
             cv2.putText(view, label, (cx + 8, cy - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (20, 20, 20), 1, cv2.LINE_AA)
         return view
+
+
+register(RoboticTool())
