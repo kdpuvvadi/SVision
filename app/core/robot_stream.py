@@ -190,7 +190,7 @@ class RobotStreamHub:
                     break
                 image = None
                 cam = camera_from_project(project)
-                if cam.source in {"usb", "gige"} and cam.status().connected:
+                if cam.source in {"usb", "gige", "gentl"} and cam.status().connected:
                     try:
                         image = cam.grab()
                     except Exception:

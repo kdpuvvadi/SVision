@@ -150,7 +150,7 @@ class MeasureService:
             # Prefer the selected/stored image until a live camera is actually connected.
             if stored:
                 source = "stored"
-            elif cam.source in {"usb", "gige"} and cam.status().connected:
+            elif cam.source in {"usb", "gige", "gentl"} and cam.status().connected:
                 source = "live"
             else:
                 source = "stored"
