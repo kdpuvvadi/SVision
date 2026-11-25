@@ -296,14 +296,16 @@ class ShapeSearchTool(Tool):
 
     @staticmethod
     def _draw_hit(image: np.ndarray, found: dict, passed: bool) -> np.ndarray:
+        from app.core.engine import _oriented_rect_points
+
         view = image.copy()
         color = (40, 220, 160) if passed else (60, 60, 230)
         thick = max(2, int(round(min(view.shape[:2]) / 320)))
         cx, cy = float(found["x"]), float(found["y"])
         rw, rh = float(found["width"]), float(found["height"])
         angle = float(found["angle"])
-        pts = cv2.boxPoints(((cx, cy), (rw, rh), angle))
-        cv2.polylines(view, [np.int32(pts)], True, color, thick, cv2.LINE_AA)
+        pts = _oriented_rect_points(cx, cy, rw, rh, angle)
+        cv2.polylines(view, [np.int32(np.round(pts))], True, color, thick, cv2.LINE_AA)
         rad = np.deg2rad(angle)
         tip = (cx - rh * 0.55 * np.sin(rad), cy - rh * 0.55 * np.cos(rad))
         cv2.line(

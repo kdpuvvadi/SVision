@@ -46,10 +46,19 @@ def _fit_preview(image: np.ndarray, limit: int = 720) -> np.ndarray:
     )
 
 
-def _rotated_box_points(cx: float, cy: float, rw: float, rh: float, angle_deg: float) -> np.ndarray:
-    """Axis-aligned size (rw, rh) rotated by angle_deg around center → 4 corner points."""
-    rect = ((float(cx), float(cy)), (float(rw), float(rh)), float(angle_deg))
-    return cv2.boxPoints(rect)
+def _oriented_rect_points(cx: float, cy: float, rw: float, rh: float, angle_deg: float) -> np.ndarray:
+    """Model rectangle corners using the same convention as cv2.getRotationMatrix2D / warpAffine.
+
+    cv2.boxPoints uses a different angle convention and mis-draws Shape Search hits.
+    """
+    rad = np.deg2rad(float(angle_deg))
+    cos_a, sin_a = np.cos(rad), np.sin(rad)
+    hw, hh = float(rw) / 2.0, float(rh) / 2.0
+    local = ((-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh))
+    return np.array(
+        [[cx + cos_a * lx + sin_a * ly, cy - sin_a * lx + cos_a * ly] for lx, ly in local],
+        dtype=np.float32,
+    )
 
 
 def _mark_pose(view: np.ndarray, result: dict, src_w: int, src_h: int) -> np.ndarray:
@@ -65,14 +74,12 @@ def _mark_pose(view: np.ndarray, result: dict, src_w: int, src_h: int) -> np.nda
     angle = float(result.get("angle") or 0.0)
     color = (40, 220, 160) if result.get("judgment") == "OK" else (60, 60, 230)
     thick = max(2, int(round(min(marked.shape[:2]) / 320)))
-    # Draw in source pixels then scale, so rotation matches model size/angle.
-    pts = _rotated_box_points(x, y, rw, rh, angle)
+    pts = _oriented_rect_points(x, y, rw, rh, angle)
     pts[:, 0] *= sx
     pts[:, 1] *= sy
-    cv2.polylines(marked, [np.int32(pts)], True, color, thick, cv2.LINE_AA)
-    # Orientation tick from center toward the "top" edge of the model.
+    cv2.polylines(marked, [np.int32(np.round(pts))], True, color, thick, cv2.LINE_AA)
+    # Orientation tick toward the top edge of the model (local -Y).
     rad = np.deg2rad(angle)
-    # OpenCV box angle: width axis; top of model is -90° in local frame (toward -height).
     tip_x = x + (-rh * 0.55) * np.sin(rad)
     tip_y = y + (-rh * 0.55) * np.cos(rad)
     cv2.line(

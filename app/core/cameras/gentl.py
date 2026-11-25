@@ -18,17 +18,65 @@
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import cv2
 import numpy as np
 
 from app.core.cameras.base import CameraBackend, CameraStatus
 from app.core.cameras.registry import register_backend
+
+
+@contextmanager
+def _quiet_optional_gentl_logs() -> Iterator[None]:
+    """Hide harmless GenTL 1.6 optional-API probes printed by genicam/CTI to stderr.
+
+    Lines like "GenTL producer does not implement DSGetNumFlows" are capability
+    inventory, not failures. Real errors are still forwarded.
+    """
+    try:
+        old_fd = os.dup(2)
+    except OSError:
+        yield
+        return
+    tmp = tempfile.TemporaryFile()
+    try:
+        os.dup2(tmp.fileno(), 2)
+        yield
+    finally:
+        try:
+            sys.stderr.flush()
+        except Exception:
+            pass
+        try:
+            os.dup2(old_fd, 2)
+        except OSError:
+            pass
+        try:
+            os.close(old_fd)
+        except OSError:
+            pass
+        try:
+            tmp.flush()
+            tmp.seek(0)
+            text = tmp.read().decode(errors="replace")
+            for line in text.splitlines():
+                if "does not implement" in line:
+                    continue
+                if line.strip():
+                    print(line, file=sys.__stderr__, flush=True)
+        except Exception:
+            pass
+        try:
+            tmp.close()
+        except Exception:
+            pass
 
 _XML_CACHE: dict[str, Path] = {}
 _DEFAULT_CTI_HINTS = [
@@ -146,54 +194,55 @@ def list_gentl_devices(cti_path: str, *, probe_ip: bool = True) -> list[dict[str
     except ImportError as exc:
         raise RuntimeError("GenTL support needs the genicam package. Run install.bat.") from exc
 
-    producer = GenTLProducer.create_producer()
-    producer.open(cti)
-    system = producer.create_system()
-    system.open()
-    try:
-        system.update_interface_info_list(3000)
-        devices: list[dict[str, str]] = []
-        for iface_info in system.interface_info_list:
-            iface = iface_info.create_interface()
-            iface.open()
-            try:
-                iface.update_device_info_list(4000)
-                for info in iface.device_info_list:
-                    row = {
-                        "id": str(getattr(info, "id_", "") or ""),
-                        "display_name": str(getattr(info, "display_name", "") or ""),
-                        "model": str(getattr(info, "model", "") or ""),
-                        "vendor": str(getattr(info, "vendor", "") or ""),
-                        "serial": str(getattr(info, "serial_number", "") or ""),
-                        "tl_type": str(getattr(info, "tl_type", "") or ""),
-                        "interface": str(getattr(iface_info, "display_name", "") or ""),
-                        "ip": "",
-                    }
-                    if probe_ip:
-                        device = None
-                        try:
-                            device = info.create_device()
+    with _quiet_optional_gentl_logs():
+        producer = GenTLProducer.create_producer()
+        producer.open(cti)
+        system = producer.create_system()
+        system.open()
+        try:
+            system.update_interface_info_list(3000)
+            devices: list[dict[str, str]] = []
+            for iface_info in system.interface_info_list:
+                iface = iface_info.create_interface()
+                iface.open()
+                try:
+                    iface.update_device_info_list(4000)
+                    for info in iface.device_info_list:
+                        row = {
+                            "id": str(getattr(info, "id_", "") or ""),
+                            "display_name": str(getattr(info, "display_name", "") or ""),
+                            "model": str(getattr(info, "model", "") or ""),
+                            "vendor": str(getattr(info, "vendor", "") or ""),
+                            "serial": str(getattr(info, "serial_number", "") or ""),
+                            "tl_type": str(getattr(info, "tl_type", "") or ""),
+                            "interface": str(getattr(iface_info, "display_name", "") or ""),
+                            "ip": "",
+                        }
+                        if probe_ip:
+                            device = None
                             try:
-                                device.open(DAF.DEVICE_ACCESS_CONTROL)
-                            except Exception:
-                                device.open(DAF.DEVICE_ACCESS_READONLY)
-                            row["ip"] = _read_device_ip(device)
-                        except Exception:
-                            row["ip"] = ""
-                        finally:
-                            if device is not None:
+                                device = info.create_device()
                                 try:
-                                    if device.is_open():
-                                        device.close()
+                                    device.open(DAF.DEVICE_ACCESS_CONTROL)
                                 except Exception:
-                                    pass
-                    devices.append(row)
-            finally:
-                iface.close()
-        return devices
-    finally:
-        system.close()
-        producer.close()
+                                    device.open(DAF.DEVICE_ACCESS_READONLY)
+                                row["ip"] = _read_device_ip(device)
+                            except Exception:
+                                row["ip"] = ""
+                            finally:
+                                if device is not None:
+                                    try:
+                                        if device.is_open():
+                                            device.close()
+                                    except Exception:
+                                        pass
+                        devices.append(row)
+                finally:
+                    iface.close()
+            return devices
+        finally:
+            system.close()
+            producer.close()
 
 
 def _load_remote_nodemap(device):
@@ -459,6 +508,37 @@ class GenTLBackend(CameraBackend):
         iface_timeout = _IFACE_TIMEOUT_KNOWN_MS if known else _IFACE_TIMEOUT_MS
         device_timeout = _DEVICE_TIMEOUT_KNOWN_MS if known else _DEVICE_TIMEOUT_MS
 
+        with _quiet_optional_gentl_logs():
+            return self._open_session_body(
+                GenTLProducer,
+                DAF,
+                EVENT_TYPE_LIST,
+                BufferToken,
+                DataStream,
+                EventManagerNewBuffer,
+                ACQ_START_FLAGS_LIST,
+                open_started,
+                wanted,
+                want_ip,
+                iface_timeout,
+                device_timeout,
+            )
+
+    def _open_session_body(
+        self,
+        GenTLProducer,
+        DAF,
+        EVENT_TYPE_LIST,
+        BufferToken,
+        DataStream,
+        EventManagerNewBuffer,
+        ACQ_START_FLAGS_LIST,
+        open_started: float,
+        wanted: str,
+        want_ip: str,
+        iface_timeout: int,
+        device_timeout: int,
+    ) -> None:
         producer = GenTLProducer.create_producer()
         producer.open(self.cti_path)
         system = producer.create_system()
