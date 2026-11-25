@@ -123,6 +123,13 @@ def _public_batch(result: dict) -> dict:
     return _public_result(result)
 
 
+@app.get("/api/accel/devices")
+def accel_devices() -> dict:
+    from app.core.accel import list_accel_devices
+
+    return {"devices": list_accel_devices()}
+
+
 @app.get("/api/health")
 def health() -> dict:
     ips = lan_addresses()

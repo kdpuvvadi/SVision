@@ -22,34 +22,53 @@ import time
 import cv2
 import numpy as np
 
+from app.core.accel import ocr_use_cuda, resolve_accel
 from app.core.features import apply_roi
 
-_engine = None
-_engine_error = ""
+_engines: dict[str, object] = {}
+_engine_errors: dict[str, str] = {}
 _REC_HEIGHT = 48
 
 
 def ocr_available() -> bool:
     try:
-        _reader()
+        _reader("cpu")
         return True
     except Exception:
         return False
 
 
-def _reader():
-    global _engine, _engine_error
-    if _engine is not None:
-        return _engine
-    if _engine_error:
-        raise RuntimeError(_engine_error)
+def _engine_key(accel_device: str | None) -> str:
+    if ocr_use_cuda(accel_device):
+        return "cuda"
+    return "cpu"
+
+
+def _reader(accel_device: str | None = "cpu"):
+    key = _engine_key(accel_device)
+    if key in _engines:
+        return _engines[key]
+    err = _engine_errors.get(key)
+    if err:
+        raise RuntimeError(err)
     try:
         from rapidocr_onnxruntime import RapidOCR
     except ImportError as exc:
-        _engine_error = "OCR library is missing. Run: pip install rapidocr-onnxruntime"
-        raise RuntimeError(_engine_error) from exc
-    _engine = RapidOCR()
-    return _engine
+        msg = "OCR library is missing. Run: pip install rapidocr-onnxruntime"
+        _engine_errors[key] = msg
+        raise RuntimeError(msg) from exc
+    kwargs: dict = {}
+    if key == "cuda":
+        kwargs = {"det_use_cuda": True, "cls_use_cuda": True, "rec_use_cuda": True}
+    try:
+        _engines[key] = RapidOCR(**kwargs) if kwargs else RapidOCR()
+    except Exception as exc:
+        if key == "cuda":
+            # Fall back to CPU engine if CUDA session fails to start.
+            return _reader("cpu")
+        _engine_errors[key] = str(exc)
+        raise RuntimeError(str(exc)) from exc
+    return _engines[key]
 
 
 def _match(text: str, expected: str, mode: str) -> bool:
@@ -164,8 +183,8 @@ def _first_text(output) -> tuple[str, float]:
     return "", 0.0
 
 
-def _recognizer():
-    engine = _reader()
+def _recognizer(accel_device: str | None = "cpu"):
+    engine = _reader(accel_device)
     rec = (
         getattr(engine, "text_recognizer", None)
         or getattr(engine, "text_rec", None)
@@ -176,8 +195,8 @@ def _recognizer():
     return rec
 
 
-def _recognize(view: np.ndarray) -> tuple[str, float]:
-    output = _recognizer()([np.ascontiguousarray(view)])
+def _recognize(view: np.ndarray, accel_device: str | None = "cpu") -> tuple[str, float]:
+    output = _recognizer(accel_device)([np.ascontiguousarray(view)])
     return _first_text(output)
 
 
@@ -195,7 +214,7 @@ def _prefer(candidates: list[tuple[str, float]], expected: str) -> str:
     return ranked[0][0]
 
 
-def _read_line(gray: np.ndarray, expected: str = "") -> str:
+def _read_line(gray: np.ndarray, expected: str = "", accel_device: str | None = "cpu") -> str:
     mask = _ink_mask(gray)
     trimmed = _trim(gray, mask)
     if trimmed.size == 0:
@@ -203,27 +222,34 @@ def _read_line(gray: np.ndarray, expected: str = "") -> str:
     wanted = " ".join((expected or "").split()).lower()
     found = []
     for view in (_to_rec(trimmed), _to_rec(_thicken(trimmed))):
-        text, score = _recognize(view)
+        text, score = _recognize(view, accel_device)
         found.append((text, score))
         if wanted and wanted in text.lower():
             return text
     return _prefer(found, expected)
 
 
-def _read_crop(gray: np.ndarray, expected: str = "") -> str:
+def _read_crop(gray: np.ndarray, expected: str = "", accel_device: str | None = "cpu") -> str:
     mask = _ink_mask(gray)
     gray = _trim(gray, mask, pad=2)
     mask = _ink_mask(gray)
     lines = []
     for y0, y1 in _line_spans(mask):
-        text = _read_line(gray[y0:y1], expected)
+        text = _read_line(gray[y0:y1], expected, accel_device)
         if text:
             lines.append(text)
     return " ".join(lines)
 
 
-def read_text(image: np.ndarray, roi: dict | None = None, expected: str = "", match_mode: str = "contains") -> dict:
+def read_text(
+    image: np.ndarray,
+    roi: dict | None = None,
+    expected: str = "",
+    match_mode: str = "contains",
+    accel_device: str | None = "cpu",
+) -> dict:
     started = time.perf_counter()
+    resolved = resolve_accel(accel_device)
     try:
         if not _valid_roi(roi):
             raise ValueError("Draw a region. OCR reads only that region.")
@@ -232,13 +258,14 @@ def read_text(image: np.ndarray, roi: dict | None = None, expected: str = "", ma
             gray = cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY)
         else:
             gray = cropped
-        text = _read_crop(gray, expected)
+        text = _read_crop(gray, expected, accel_device)
     except Exception as exc:
         return {
             "judgment": "NG",
             "text": "",
             "expected": expected,
             "available": False,
+            "accel": resolved.get("id", "cpu"),
             "message": str(exc),
             "elapsed_ms": (time.perf_counter() - started) * 1000.0,
         }
@@ -250,6 +277,7 @@ def read_text(image: np.ndarray, roi: dict | None = None, expected: str = "", ma
         "expected": expected,
         "match_mode": match_mode,
         "available": True,
+        "accel": _engine_key(accel_device),
         "message": text or "No text",
         "elapsed_ms": (time.perf_counter() - started) * 1000.0,
     }

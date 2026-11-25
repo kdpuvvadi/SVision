@@ -28,7 +28,7 @@ class OcrTool(Tool):
     type = "ocr"
     title = "OCR"
     summary = "Read text only inside the drawn region."
-    ui_modules = ["/static/tools/ocr.js"]
+    ui_modules = ["/static/tools/accel.js", "/static/tools/ocr.js"]
 
     def fields(self) -> list[dict]:
         return [
@@ -43,11 +43,16 @@ class OcrTool(Tool):
                     {"value": "regex", "label": "Regex"},
                 ],
             },
+            {
+                "key": "accel_device",
+                "label": "Hardware acceleration",
+                "kind": "accel",
+            },
             {"key": "roi", "label": "Region", "kind": "roi"},
         ]
 
     def default_config(self) -> dict:
-        return {"expected": "", "match_mode": "contains", "roi": None}
+        return {"expected": "", "match_mode": "contains", "accel_device": "cpu", "roi": None}
 
     def status(self) -> str:
         if ocr_available():
@@ -56,7 +61,13 @@ class OcrTool(Tool):
 
     def run(self, image: np.ndarray, tool: dict, project_id: str, ctx: dict | None = None) -> tuple[dict, np.ndarray | None]:
         cfg = tool.get("config") or {}
-        result = read_text(image, cfg.get("roi"), cfg.get("expected") or "", cfg.get("match_mode") or "contains")
+        result = read_text(
+            image,
+            cfg.get("roi"),
+            cfg.get("expected") or "",
+            cfg.get("match_mode") or "contains",
+            accel_device=cfg.get("accel_device") or "cpu",
+        )
         result.update({"id": tool.get("id"), "type": self.type, "name": tool.get("name") or self.title})
         return result, None
 

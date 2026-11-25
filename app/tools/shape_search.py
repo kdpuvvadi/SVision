@@ -22,6 +22,7 @@ import time
 import cv2
 import numpy as np
 
+from app.core.accel import resolve_accel, use_opencl
 from app.core.features import _roi_box
 from app.tools.base import Tool
 from app.tools.registry import register
@@ -52,7 +53,7 @@ def _edges(gray: np.ndarray) -> np.ndarray:
 
 
 def _rotate(gray: np.ndarray, angle: float) -> np.ndarray:
-    if abs(angle) < 0.1:
+    if abs(angle) < 0.05:
         return gray
     h, w = gray.shape[:2]
     matrix = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), angle, 1.0)
@@ -75,11 +76,38 @@ def _small(image: np.ndarray, max_edge: int = _MAX_EDGE) -> tuple[np.ndarray, fl
     return out, scale
 
 
-def _match(search_edges: np.ndarray, model: np.ndarray) -> tuple[float, int, int]:
-    templ = _edges(model)
-    if templ.shape[0] >= search_edges.shape[0] or templ.shape[1] >= search_edges.shape[1]:
+def _angle_list(span: int, step: float) -> list[float]:
+    span = max(0, int(span))
+    if span <= 0:
+        return [0.0]
+    step = max(0.5, float(step or 2.0))
+    values = list(np.arange(-span, span + 1e-6, step))
+    # Prefer 0 first for early-ish high-confidence hits, then denser sweep.
+    ordered = [0.0] + [float(a) for a in values if abs(float(a)) > 1e-6]
+    # Deduplicate while preserving order
+    seen: set[float] = set()
+    out: list[float] = []
+    for a in ordered:
+        key = round(a, 3)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(a)
+    return out
+
+
+def _match_template(search: np.ndarray, templ: np.ndarray, opencl: bool) -> tuple[float, int, int]:
+    if templ.shape[0] >= search.shape[0] or templ.shape[1] >= search.shape[1]:
         return -1.0, 0, 0
-    result = cv2.matchTemplate(search_edges, templ, cv2.TM_CCOEFF_NORMED)
+    if opencl:
+        try:
+            cv2.ocl.setUseOpenCL(True)
+            result = cv2.matchTemplate(cv2.UMat(search), cv2.UMat(templ), cv2.TM_CCOEFF_NORMED)
+            result = result.get() if hasattr(result, "get") else result
+        except Exception:
+            result = cv2.matchTemplate(search, templ, cv2.TM_CCOEFF_NORMED)
+    else:
+        result = cv2.matchTemplate(search, templ, cv2.TM_CCOEFF_NORMED)
     _, value, _, loc = cv2.minMaxLoc(result)
     return float(value), int(loc[0]), int(loc[1])
 
@@ -88,7 +116,7 @@ class ShapeSearchTool(Tool):
     type = "shape_search"
     title = "Shape Search"
     summary = "Register any pattern by drawing it on the image, then search for that model."
-    ui_modules = ["/static/tools/shape_search.js"]
+    ui_modules = ["/static/tools/accel.js", "/static/tools/shape_search.js"]
 
     def fields(self) -> list[dict]:
         return [
@@ -109,7 +137,24 @@ class ShapeSearchTool(Tool):
                     {"value": "0", "label": "No rotation"},
                     {"value": "10", "label": "±10 degrees"},
                     {"value": "20", "label": "±20 degrees"},
+                    {"value": "45", "label": "±45 degrees"},
+                    {"value": "90", "label": "±90 degrees"},
                 ],
+            },
+            {
+                "key": "angle_step",
+                "label": "Angle step",
+                "kind": "select",
+                "options": [
+                    {"value": "5", "label": "5° (faster)"},
+                    {"value": "2", "label": "2° (balanced)"},
+                    {"value": "1", "label": "1° (finest)"},
+                ],
+            },
+            {
+                "key": "accel_device",
+                "label": "Hardware acceleration",
+                "kind": "accel",
             },
         ]
 
@@ -120,12 +165,18 @@ class ShapeSearchTool(Tool):
         return {"shape_model": "Model"}
 
     def default_config(self) -> dict:
-        return {"search_roi": None, "min_confidence": 0.6, "angle_range": "10"}
+        return {
+            "search_roi": None,
+            "min_confidence": 0.6,
+            "angle_range": "20",
+            "angle_step": "2",
+            "accel_device": "cpu",
+        }
 
     def status(self) -> str:
         return (
             "Open Model. If Camera is USB/GenTL, Grab from camera; otherwise choose an image. "
-            "Draw around the pattern, then Register."
+            "Draw around the pattern (drag edges/corners to fine-tune), then Register."
         )
 
     def mount(self, app) -> None:
@@ -138,6 +189,8 @@ class ShapeSearchTool(Tool):
         cfg = tool.get("config") or {}
         name = tool.get("name") or self.title
         min_confidence = float(cfg.get("min_confidence", 0.6))
+        accel = resolve_accel(cfg.get("accel_device") or "cpu")
+        opencl = use_opencl(cfg.get("accel_device"))
         model = self._load_model(project_id, tool.get("id", ""))
         view = image
         if model is None:
@@ -148,6 +201,7 @@ class ShapeSearchTool(Tool):
                 "judgment": "NG",
                 "confidence": 0.0,
                 "min_confidence": min_confidence,
+                "accel": accel.get("id", "cpu"),
                 "message": "Model image is not saved. Register a pattern on the Model tab.",
                 "elapsed_ms": (time.perf_counter() - started) * 1000.0,
             }, view
@@ -161,23 +215,28 @@ class ShapeSearchTool(Tool):
         mh, mw = gray_model.shape[:2]
         if mh >= sh or mw >= sw:
             gray_model = cv2.resize(gray_model, (max(1, sw // 2), max(1, sh // 2)), interpolation=cv2.INTER_LINEAR)
+
         search_gray = gray_search
+        search_edges = _edges(search_gray)
         span = int(cfg.get("angle_range") or 0)
-        angles = [0]
-        if span > 0:
-            angles = [0, -span, span]
+        step = float(cfg.get("angle_step") or 2)
+        angles = _angle_list(span, step)
         inv = 1.0 / scale
 
         best = None
         for angle in angles:
-            templ = _rotate(gray_model, angle)
-            if templ.shape[0] >= search_gray.shape[0] or templ.shape[1] >= search_gray.shape[1]:
+            templ_gray = _rotate(gray_model, angle)
+            if templ_gray.shape[0] >= search_gray.shape[0] or templ_gray.shape[1] >= search_gray.shape[1]:
                 continue
-            result = cv2.matchTemplate(search_gray, templ, cv2.TM_CCOEFF_NORMED)
-            _, score, _, loc = cv2.minMaxLoc(result)
+            # Edge match is more robust when the scene object is rotated relative to the model.
+            score_e, px_e, py_e = _match_template(search_edges, _edges(templ_gray), opencl)
+            score_g, px_g, py_g = _match_template(search_gray, templ_gray, opencl)
+            if score_e >= score_g:
+                score, px, py, templ = score_e, px_e, py_e, templ_gray
+            else:
+                score, px, py, templ = score_g, px_g, py_g, templ_gray
             score = max(0.0, float(score))
             if best is None or score > best["confidence"]:
-                px, py = int(loc[0]), int(loc[1])
                 best = {
                     "confidence": score,
                     "x": x0 + (px + templ.shape[1] / 2.0) * inv,
@@ -187,8 +246,6 @@ class ShapeSearchTool(Tool):
                     "angle": float(angle),
                     "tl": (x0 + px * inv, y0 + py * inv),
                 }
-            if angle == 0 and best["confidence"] >= min_confidence:
-                break
 
         elapsed = (time.perf_counter() - started) * 1000.0
         view = None
@@ -202,6 +259,7 @@ class ShapeSearchTool(Tool):
                 "judgment": "NG",
                 "confidence": 0.0,
                 "min_confidence": min_confidence,
+                "accel": accel.get("id", "cpu"),
                 "message": "Registered pattern was not found.",
                 "elapsed_ms": elapsed,
             }, view
@@ -223,13 +281,14 @@ class ShapeSearchTool(Tool):
             "judgment": "OK" if passed else "NG",
             "confidence": best["confidence"],
             "min_confidence": min_confidence,
+            "accel": accel.get("id", "cpu"),
             "x": round(best["x"], 1),
             "y": round(best["y"], 1),
             "angle": round(best["angle"], 1),
             "width": round(best["width"], 1),
             "height": round(best["height"], 1),
             "pose": pose,
-            "message": f"Pattern  confidence {best['confidence'] * 100:.1f}%",
+            "message": f"Pattern  confidence {best['confidence'] * 100:.1f}%  ∠{best['angle']:.1f}°",
             "elapsed_ms": elapsed,
         }, view
 
