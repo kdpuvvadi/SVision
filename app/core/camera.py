@@ -55,6 +55,12 @@ class ImageSource:
     def grab(self) -> np.ndarray:
         return self._backend.grab()
 
+    def grab_fresh(self) -> np.ndarray:
+        backend = self._backend
+        if hasattr(backend, "grab_fresh"):
+            return backend.grab_fresh()
+        return backend.grab()
+
     @property
     def last_grab_ms(self) -> float:
         return float(getattr(self._backend, "_last_grab_ms", 0.0) or 0.0)

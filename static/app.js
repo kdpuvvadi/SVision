@@ -104,10 +104,13 @@ async function grabLiveCamera() {
   state.sourceUrl = URL.createObjectURL(blob);
   state.storedImage = true;
   state.outputId = null;
+  state.lastResults = [];
   $("emptyState").hidden = true;
   $("preview").hidden = false;
+  // Force <img> to take the new blob even if the previous src looked identical.
+  $("preview").removeAttribute("src");
   $("preview").src = state.sourceUrl;
-  $("imageName").textContent = "live-camera.jpg";
+  $("imageName").textContent = `live-camera ${new Date().toLocaleTimeString()}`;
   const w = res.headers.get("X-Image-Width");
   const h = res.headers.get("X-Image-Height");
   $("imageSize").textContent = w && h ? `${w} × ${h}` : "";
@@ -127,7 +130,9 @@ async function grabShapeModelFromCamera() {
     state.modelUrl = URL.createObjectURL(file);
     drawModelCanvas();
     if (typeof drawRoiCanvas === "function") drawRoiCanvas();
-    if (status) status.textContent = "Grabbed. Draw the pattern, then Register.";
+    if (status) {
+      status.textContent = `Grabbed ${new Date().toLocaleTimeString()}. Draw the pattern, then Register.`;
+    }
   } catch (err) {
     if (status) status.textContent = err.message || String(err);
     throw err;

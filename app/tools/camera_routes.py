@@ -98,5 +98,7 @@ def mount(app: Any) -> None:
                 "X-Image-Width": str(width),
                 "X-Image-Height": str(height),
                 "X-Camera-Source": source,
+                "Cache-Control": "no-store, no-cache, must-revalidate",
+                "Pragma": "no-cache",
             },
         )

@@ -172,7 +172,7 @@ class MeasureService:
 
         if source == "live":
             grab_started = time.perf_counter()
-            frame = cam.grab()
+            frame = cam.grab_fresh()
             grab_ms = (time.perf_counter() - grab_started) * 1000.0
             print(
                 f"[Measure] live grab {grab_ms:.1f} ms "

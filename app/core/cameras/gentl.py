@@ -290,27 +290,42 @@ class GenTLBackend(CameraBackend):
             return CameraStatus(self.source, True, f"GenTL camera {label} ready.")
 
     def grab(self) -> np.ndarray:
-        with self._lock:
-            started = time.perf_counter()
-            frame = self._grab_unlocked()
-            self._last_grab_ms = (time.perf_counter() - started) * 1000.0
-            return frame
-
-    def grab_fresh(self, discard: int = 1) -> np.ndarray:
-        """Wait for complete frame(s), drop stale ones, return a full current image."""
+        """Return the newest live frame (flush free-run backlog first)."""
         with self._lock:
             started = time.perf_counter()
             self._ensure_open()
-            # Drop one stale free-run frame, then take the next full frame.
-            for _ in range(max(0, int(discard))):
-                try:
-                    buf = self._wait_buffer(timeout_ms=800)
-                    self._stream.queue_buffer(buf)
-                except Exception:
-                    break
+            self._flush_stale_buffers()
             frame = self._grab_unlocked(ensure=False)
             self._last_grab_ms = (time.perf_counter() - started) * 1000.0
             return frame
+
+    def grab_fresh(self, discard: int = 0) -> np.ndarray:
+        """Same as grab — always the newest frame, not a queued older one."""
+        del discard  # kept for call-site compatibility
+        return self.grab()
+
+    def _flush_stale_buffers(self, max_flush: int = 64) -> int:
+        """Drop already-filled free-run buffers so the next wait is a new exposure.
+
+        With several announced buffers the producer queues old frames. Taking the
+        next event without flushing looks 'live' (unique hashes) but can be
+        seconds behind the scene — e.g. a phone slideshow under the lens.
+        """
+        assert self._stream is not None and self._event_manager is not None
+        flushed = 0
+        while flushed < max_flush:
+            try:
+                # 1 ms: only buffers already waiting. 0 is rejected by some producers.
+                self._event_manager.update_event_data(1)
+            except Exception:
+                break
+            buffer = self._event_manager.buffer
+            try:
+                self._stream.queue_buffer(buffer)
+            except Exception:
+                break
+            flushed += 1
+        return flushed
 
     def _buffer_looks_incomplete(self, buffer) -> bool:
         """True only when GenTL clearly reports a bad transfer."""
@@ -559,8 +574,8 @@ class GenTLBackend(CameraBackend):
         stream.open(list(device.data_stream_ids)[0])
         handles: list = []
         keep: list[bytes] = []
-        # More queued buffers absorb GigE jitter without dropping to incomplete frames.
-        for index in range(8):
+        # Few buffers: less free-run backlog (stale frames) while still covering GigE jitter.
+        for index in range(3):
             raw = bytes(payload)
             keep.append(raw)
             handle = stream.announce_buffer(BufferToken(raw, index))
