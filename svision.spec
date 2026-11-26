@@ -32,6 +32,17 @@ hiddenimports = [
     "app.core.classifier",
     "app.core.features",
     "app.tools.registry",
+    "app.tools.camera",
+    "app.tools.camera_routes",
+    "app.tools.classify",
+    "app.tools.classify_routes",
+    "app.tools.code",
+    "app.tools.ocr",
+    "app.tools.position_compensation",
+    "app.tools.robotic",
+    "app.tools.robotic_routes",
+    "app.tools.shape_search",
+    "app.tools.shape_search_routes",
     "app.storage.store",
     "uvicorn",
     "uvicorn.logging",
@@ -53,6 +64,7 @@ hiddenimports = [
     "shapely",
     "onnxruntime",
     "rapidocr_onnxruntime",
+    "zxingcpp",
 ]
 hiddenimports += collect_submodules("app")
 

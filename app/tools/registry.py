@@ -26,6 +26,17 @@ from app.tools.base import Tool
 
 _TOOLS: dict[str, Tool] = {}
 _DISCOVERED = False
+# Explicit list so PyInstaller and frozen pkgutil both see every tool.
+# Dynamic importlib discovery alone is invisible to the freezer.
+_TOOL_MODULES = (
+    "camera",
+    "classify",
+    "code",
+    "ocr",
+    "position_compensation",
+    "robotic",
+    "shape_search",
+)
 _SKIP_MODULES = {"base", "registry", "__init__"}
 
 
@@ -114,10 +125,25 @@ def discover() -> None:
     if _DISCOVERED:
         return
     _DISCOVERED = True
-    import app.tools as tools_pkg
 
-    for module in pkgutil.iter_modules(tools_pkg.__path__):
-        name = module.name
-        if name in _SKIP_MODULES or name.startswith("_") or name.endswith("_routes"):
-            continue
+    loaded = set()
+    for name in _TOOL_MODULES:
         importlib.import_module(f"app.tools.{name}")
+        loaded.add(name)
+
+    # Pick up any extra tool modules during editable/dev runs.
+    try:
+        import app.tools as tools_pkg
+
+        for module in pkgutil.iter_modules(tools_pkg.__path__):
+            name = module.name
+            if (
+                name in loaded
+                or name in _SKIP_MODULES
+                or name.startswith("_")
+                or name.endswith("_routes")
+            ):
+                continue
+            importlib.import_module(f"app.tools.{name}")
+    except Exception:
+        pass
