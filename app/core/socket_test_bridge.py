@@ -132,7 +132,12 @@ async def socket_test_session(ws: WebSocket, host: str | None = None, port: int 
             while not stop.is_set():
                 try:
                     chunk = await loop.run_in_executor(None, sock.recv, 65536)
+                except socket.timeout:
+                    # Idle is normal — results only arrive after a measure/trigger.
+                    continue
                 except OSError as exc:
+                    if stop.is_set():
+                        break
                     await _send(ws, {"type": "log", "level": "error", "message": f"TCP read error: {exc}"})
                     break
                 if not chunk:
@@ -160,8 +165,17 @@ async def socket_test_session(ws: WebSocket, host: str | None = None, port: int 
                         },
                     )
         finally:
-            await _send(ws, {"type": "status", "connected": False, "server": _target_from_settings(host, port)[2], "message": "Disconnected from TCP socket"})
-            log("[SocketTest] TCP session ended")
+            if not stop.is_set():
+                await _send(
+                    ws,
+                    {
+                        "type": "status",
+                        "connected": False,
+                        "server": _target_from_settings(host, port)[2],
+                        "message": "Disconnected from TCP socket",
+                    },
+                )
+                log("[SocketTest] TCP session ended")
 
     try:
         while True:
@@ -233,6 +247,14 @@ async def socket_test_session(ws: WebSocket, host: str | None = None, port: int 
                     },
                 )
                 await _send(ws, {"type": "log", "level": "ok", "message": f"Connected to TCP {connect_host}:{connect_port}"})
+                await _send(
+                    ws,
+                    {
+                        "type": "log",
+                        "level": "info",
+                        "message": "Listening for results — click Trigger or run Measure in SVision.",
+                    },
+                )
                 log(f"[SocketTest] connected TCP {connect_host}:{connect_port}")
             elif action == "disconnect":
                 await close_tcp()
