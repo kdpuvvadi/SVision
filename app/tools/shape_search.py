@@ -336,18 +336,49 @@ def build_solid_model(crop: np.ndarray, figures: list[dict[str, Any]] | None = N
     }
 
 
+def _template_content_mask(templ: np.ndarray) -> np.ndarray | None:
+    """Mask near-black padding so NCC scores the shape, not empty canvas."""
+    if templ.size == 0:
+        return None
+    # Solid models sit on black; ignore the pad so slight rotation is distinguishable.
+    mask = (templ > 8).astype(np.uint8) * 255
+    on = int(cv2.countNonZero(mask))
+    if on < 24 or on >= int(templ.size * 0.92):
+        return None
+    mask = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=1)
+    return mask
+
+
 def _match_template_once(search: np.ndarray, templ: np.ndarray, opencl: bool) -> tuple[float, int, int]:
     if templ.shape[0] >= search.shape[0] or templ.shape[1] >= search.shape[1]:
         return -1.0, 0, 0
-    if opencl:
-        try:
-            cv2.ocl.setUseOpenCL(True)
-            result = cv2.matchTemplate(cv2.UMat(search), cv2.UMat(templ), cv2.TM_CCOEFF_NORMED)
-            result = result.get() if hasattr(result, "get") else result
-        except Exception:
-            result = cv2.matchTemplate(search, templ, cv2.TM_CCOEFF_NORMED)
-    else:
-        result = cv2.matchTemplate(search, templ, cv2.TM_CCOEFF_NORMED)
+
+    def _run(mask: np.ndarray | None) -> np.ndarray:
+        if mask is not None:
+            return cv2.matchTemplate(search, templ, cv2.TM_CCOEFF_NORMED, mask=mask)
+        if opencl:
+            try:
+                cv2.ocl.setUseOpenCL(True)
+                result = cv2.matchTemplate(cv2.UMat(search), cv2.UMat(templ), cv2.TM_CCOEFF_NORMED)
+                return result.get() if hasattr(result, "get") else result
+            except Exception:
+                pass
+        return cv2.matchTemplate(search, templ, cv2.TM_CCOEFF_NORMED)
+
+    mask = _template_content_mask(templ)
+    try:
+        result = _run(mask)
+        if mask is not None and (result is None or not np.isfinite(result).any()):
+            result = _run(None)
+    except Exception:
+        result = _run(None)
+    # Replace NaNs so minMaxLoc does not return garbage.
+    if result is None:
+        return -1.0, 0, 0
+    finite = result[np.isfinite(result)]
+    if finite.size == 0:
+        return -1.0, 0, 0
+    result = np.nan_to_num(result, nan=-1.0, posinf=-1.0, neginf=-1.0)
     _, value, _, loc = cv2.minMaxLoc(result)
     return float(value), int(loc[0]), int(loc[1])
 
@@ -640,6 +671,94 @@ def _build_hit_from_match(
     }
 
 
+def _ecc_refine_hit(
+    search: np.ndarray,
+    model: np.ndarray,
+    hit: dict,
+) -> dict | None:
+    """Recover slight rotation with ECC Euclidean alignment around a coarse hit."""
+    if hit is None or search.size == 0 or model.size == 0:
+        return None
+    cx = float(hit.get("x") or 0)
+    cy = float(hit.get("y") or 0)
+    mw = max(8, int(round(float(hit.get("width") or model.shape[1]))))
+    mh = max(8, int(round(float(hit.get("height") or model.shape[0]))))
+    angle0 = float(hit.get("angle") or 0)
+    # Patch large enough for the rotated model plus margin.
+    pad = int(max(12, 0.35 * max(mw, mh)))
+    side = int(max(mw, mh) + 2 * pad)
+    x0 = int(round(cx - side / 2.0))
+    y0 = int(round(cy - side / 2.0))
+    x1 = x0 + side
+    y1 = y0 + side
+    if x1 <= 0 or y1 <= 0 or x0 >= search.shape[1] or y0 >= search.shape[0]:
+        return None
+    # Build a search patch with replicate borders when the box clips the image.
+    patch = np.zeros((side, side), dtype=np.uint8)
+    sx0, sy0 = max(0, x0), max(0, y0)
+    sx1, sy1 = min(search.shape[1], x1), min(search.shape[0], y1)
+    dx0, dy0 = sx0 - x0, sy0 - y0
+    crop = search[sy0:sy1, sx0:sx1]
+    if crop.size == 0:
+        return None
+    patch[dy0 : dy0 + crop.shape[0], dx0 : dx0 + crop.shape[1]] = crop
+    if sx0 > x0 or sy0 > y0 or sx1 < x1 or sy1 < y1:
+        patch = cv2.copyMakeBorder(patch, 0, 0, 0, 0, cv2.BORDER_REPLICATE)
+        # Fill empty margins from nearest content.
+        if dy0 > 0:
+            patch[:dy0, :] = patch[dy0 : dy0 + 1, :]
+        if dx0 > 0:
+            patch[:, :dx0] = patch[:, dx0 : dx0 + 1]
+        bottom = dy0 + crop.shape[0]
+        right = dx0 + crop.shape[1]
+        if bottom < side:
+            patch[bottom:, :] = patch[bottom - 1 : bottom, :]
+        if right < side:
+            patch[:, right:] = patch[:, right - 1 : right]
+
+    templ = cv2.resize(model, (mw, mh), interpolation=cv2.INTER_LINEAR)
+    fill = _border_fill_value(templ)
+    templ_r, _ = _rotate_template(templ, angle0, border_value=fill)
+    # ECC needs same-size images: center the template on a patch-sized canvas.
+    templ_canvas = np.full((side, side), fill, dtype=np.uint8)
+    tx = max(0, (side - templ_r.shape[1]) // 2)
+    ty = max(0, (side - templ_r.shape[0]) // 2)
+    th = min(templ_r.shape[0], side - ty)
+    tw = min(templ_r.shape[1], side - tx)
+    if th < 8 or tw < 8:
+        return None
+    templ_canvas[ty : ty + th, tx : tx + tw] = templ_r[:th, :tw]
+    warp = np.eye(2, 3, dtype=np.float32)
+    try:
+        criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 60, 1e-5)
+        cv2.findTransformECC(
+            templ_canvas.astype(np.float32),
+            patch.astype(np.float32),
+            warp,
+            cv2.MOTION_EUCLIDEAN,
+            criteria,
+            None,
+            1,
+        )
+    except cv2.error:
+        return None
+    # warp maps template→patch: [[c,s,tx],[-s,c,ty]] in OpenCV Euclidean.
+    ang = float(np.degrees(np.arctan2(float(warp[0, 1]), float(warp[0, 0]))))
+    ang_total = angle0 + ang
+    # Re-score with the ECC angle at the hit scale.
+    templ2, matrix = _rotate_template(templ, ang_total, border_value=fill)
+    if templ2.shape[0] >= search.shape[0] or templ2.shape[1] >= search.shape[1]:
+        return None
+    score, px, py = _match_template_once(search, templ2, False)
+    if score < float(hit.get("confidence") or 0) * 0.85 and abs(ang) < 0.4:
+        return None
+    if score < 0.20:
+        return None
+    cand = _build_hit_from_match(templ, matrix, px, py, ang_total, score, 1.0)
+    cand["method"] = "template+ecc"
+    return cand
+
+
 def _refine_template_hit(
     search: np.ndarray,
     model: np.ndarray,
@@ -647,18 +766,28 @@ def _refine_template_hit(
     hit: dict,
     opencl: bool = False,
 ) -> dict:
-    """Full-resolution polish around a pyramid hit — recovers slight rotation accurately."""
+    """Polish a pyramid hit: local angle/scale search, then ECC for slight rotation."""
     if hit is None:
         return hit
     angle0 = float(hit.get("angle") or 0)
     edges = model_edges if model_edges is not None and model_edges.size else _edges(model)
-    # Wide enough that a coarse pyramid miss of a few degrees can still snap back.
-    angle_span = list(np.arange(angle0 - 8.0, angle0 + 8.0 + 1e-6, 1.0))
+    angle_span = [float(a) for a in np.arange(angle0 - 6.0, angle0 + 6.0 + 1e-6, 1.0)]
     model_f, edges_f = _fit_model_into_search(model, edges, search, angle_span)
     search_e = _edges(search)
     best = hit
     fill = _border_fill_value(model_f)
-    for scale in (0.88, 0.96, 1.0, 1.06):
+    hit_w = float(hit.get("width") or model_f.shape[1])
+    hit_h = float(hit.get("height") or model_f.shape[0])
+    # Stay near the pyramid scale — live models often peak around 0.5×.
+    base_scale = float(
+        np.clip(
+            0.5 * (hit_w / max(1.0, model_f.shape[1]) + hit_h / max(1.0, model_f.shape[0])),
+            0.35,
+            1.25,
+        )
+    )
+    scales = sorted({round(s, 3) for s in (base_scale * 0.94, base_scale, base_scale * 1.06) if 0.35 <= s <= 1.25})
+    for scale in scales:
         mw = max(8, int(round(model_f.shape[1] * scale)))
         mh = max(8, int(round(model_f.shape[0] * scale)))
         scaled = cv2.resize(model_f, (mw, mh), interpolation=cv2.INTER_LINEAR)
@@ -669,21 +798,44 @@ def _refine_template_hit(
             if templ.shape[0] >= search.shape[0] or templ.shape[1] >= search.shape[1]:
                 continue
             score_g, px_g, py_g = _match_template_once(search, templ, opencl)
+            if not np.isfinite(score_g) or score_g < 0:
+                continue
             score_e, px_e, py_e = _match_template_once(search_e, templ_e, opencl)
             score = max(0.0, float(score_g))
-            if score_e >= 0.22 and abs(px_e - px_g) <= 4 and abs(py_e - py_g) <= 4:
+            if (
+                np.isfinite(score_e)
+                and score_e >= 0.22
+                and abs(px_e - px_g) <= 4
+                and abs(py_e - py_g) <= 4
+            ):
                 blended = float(0.60 * score_g + 0.40 * max(0.0, score_e))
                 if blended > score:
                     score = blended
-            # Prefer higher score; for equal scores keep the angle closer to the pyramid seed.
             cur = float(best.get("confidence") or 0)
+            best_ang = float(best.get("angle") or 0)
             if score < cur - 1e-6:
                 continue
-            if abs(score - cur) <= 1e-6 and abs(float(angle) - angle0) >= abs(float(best.get("angle") or 0) - angle0):
+            # Don't drift off 0° for a tiny score bump (upright parts were reporting ~2°).
+            if abs(best_ang) < 0.5 and 0.5 < abs(float(angle)) <= 3.0 and score < cur + 0.03:
+                continue
+            if abs(score - cur) <= 1e-6 and abs(float(angle) - angle0) >= abs(best_ang - angle0):
                 continue
             cand = _build_hit_from_match(scaled, matrix, px_g, py_g, float(angle), score, 1.0)
             cand["method"] = "template"
             best = cand
+    # ECC recovers a few degrees when NCC bins stay stuck near 0°.
+    ecc = _ecc_refine_hit(search, model_f, best)
+    if ecc is not None:
+        ecc_conf = float(ecc.get("confidence") or 0)
+        best_conf = float(best.get("confidence") or 0)
+        ecc_ang = float(ecc.get("angle") or 0)
+        best_ang = float(best.get("angle") or 0)
+        ang_delta = abs(ecc_ang - best_ang)
+        # Ignore tiny ECC nudges on already-strong upright hits.
+        if abs(best_ang) < 0.5 and abs(ecc_ang) <= 3.0 and ecc_conf < best_conf + 0.03 and best_conf >= 0.65:
+            pass
+        elif ecc_conf >= best_conf * 0.90 and (ang_delta >= 0.75 or ecc_conf >= best_conf):
+            best = ecc
     return best
 
 
