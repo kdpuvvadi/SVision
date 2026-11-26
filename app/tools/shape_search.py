@@ -426,6 +426,41 @@ def _match_features(search: np.ndarray, model: np.ndarray) -> dict | None:
     }
 
 
+def _fit_model_into_search(
+    model: np.ndarray,
+    edges: np.ndarray,
+    search: np.ndarray,
+    angles: list[float],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Shrink the model so every rotated template still fits inside search.
+
+    A model that is only slightly smaller than the ROI grows under rotation
+    (w|cos|+h|sin|) and then every non-zero angle is skipped — that produced
+    NG + a broken overlay on rotated pieces.
+    """
+    sh, sw = search.shape[:2]
+    mh, mw = model.shape[:2]
+    max_ang = max((abs(float(a)) for a in angles), default=0.0)
+    # Headroom for the top scale step (1.08) in the pyramid.
+    scale_headroom = 1.10
+    rad = np.radians(max_ang)
+    c, s = abs(float(np.cos(rad))), abs(float(np.sin(rad)))
+    rot_w = (mw * c + mh * s) * scale_headroom
+    rot_h = (mh * c + mw * s) * scale_headroom
+    margin = 0.92
+    fit = min(1.0, (sw * margin) / max(rot_w, 1.0), (sh * margin) / max(rot_h, 1.0))
+    # If the model barely fits the ROI, shrink so multi-scale can lock on the live part.
+    if mw >= sw * 0.85 or mh >= sh * 0.85:
+        area_cap = min(1.0, float(np.sqrt((0.50 * sh * sw) / max(mh * mw, 1.0))))
+        fit = min(fit, max(0.50, area_cap))
+    if fit >= 0.999:
+        return model, edges
+    new_size = (max(8, int(round(mw * fit))), max(8, int(round(mh * fit))))
+    model = cv2.resize(model, new_size, interpolation=cv2.INTER_AREA)
+    edges = cv2.resize(edges, new_size, interpolation=cv2.INTER_NEAREST)
+    return model, edges
+
+
 def _match_template_pyramid(
     search: np.ndarray,
     model: np.ndarray,
@@ -433,23 +468,21 @@ def _match_template_pyramid(
     opencl: bool,
     model_edges: np.ndarray | None = None,
 ) -> dict | None:
-    """Edge-first correlation (Omron-style), with gray assist."""
+    """Gray-led correlation with edge assist (Omron-style solid model)."""
     search_s, s_scale = _downscale(search, _TEMPLATE_MAX_EDGE)
     target_w = max(8, int(round(model.shape[1] * s_scale)))
     target_h = max(8, int(round(model.shape[0] * s_scale)))
     model_s = cv2.resize(model, (target_w, target_h), interpolation=cv2.INTER_AREA)
     if model_edges is not None and model_edges.size:
-        edges_s = cv2.resize(model_edges, (target_w, target_h), interpolation=cv2.INTER_AREA)
+        edges_s = cv2.resize(model_edges, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
     else:
         edges_s = _edges(model_s)
-    if model_s.shape[0] >= search_s.shape[0] or model_s.shape[1] >= search_s.shape[1]:
-        fit = 0.55 * min(search_s.shape[0] / model_s.shape[0], search_s.shape[1] / model_s.shape[1])
-        new_size = (max(8, int(model_s.shape[1] * fit)), max(8, int(model_s.shape[0] * fit)))
-        model_s = cv2.resize(model_s, new_size, interpolation=cv2.INTER_AREA)
-        edges_s = cv2.resize(edges_s, new_size, interpolation=cv2.INTER_AREA)
+    model_s, edges_s = _fit_model_into_search(model_s, edges_s, search_s, angles)
 
     search_e = _edges(search_s)
-    scales = [0.90, 0.95, 1.0, 1.05, 1.10]
+    # Broad scale sweep: registered models are often larger than the live part,
+    # and rotated hits need smaller templates to stay inside the search ROI.
+    scales = [0.50, 0.60, 0.70, 0.80, 0.90, 1.0, 1.08]
     best = None
     mh0, mw0 = model_s.shape[:2]
     for scale in scales:
@@ -476,11 +509,13 @@ def _match_template_pyramid(
                 score = float(0.60 * score_g + 0.40 * max(0.0, score_e))
             if best is not None:
                 gain = score - float(best["confidence"])
-                # Near-ties keep the smaller |angle| (suppresses ±step flicker).
-                # Real rotation must still win when it scores clearly higher.
+                # Prefer higher score. For tiny gains at larger |angle|, keep the
+                # previous hit — suppresses ±step flicker without blocking real rotation.
                 if gain < -1e-9:
                     continue
-                if gain < 0.012 and abs(angle) >= abs(float(best["angle"])) - 1e-6:
+                if gain < 0.01 and abs(angle) > abs(float(best["angle"])) + 1e-6:
+                    continue
+                if gain <= 1e-9:
                     continue
             # Prefer the largest silhouette for overlay — tiny debris rings look broken when rotated.
             outline_locals = _model_outlines(scaled)
@@ -524,6 +559,91 @@ def _match_template_pyramid(
                 "tip": [tip_anchor.tolist(), tip_end.tolist()],
                 "method": "template",
             }
+    return best
+
+
+def _build_hit_from_match(
+    scaled: np.ndarray,
+    matrix: np.ndarray,
+    px: float,
+    py: float,
+    angle: float,
+    score: float,
+    s_scale: float = 1.0,
+) -> dict:
+    mh, mw = scaled.shape[:2]
+    outline_locals = _model_outlines(scaled)
+    main_local = max(
+        outline_locals,
+        key=lambda pts: float(cv2.contourArea(pts.astype(np.float32))),
+    )
+    ones = np.ones((len(main_local), 1), dtype=np.float64)
+    outline = (matrix @ np.hstack([main_local, ones]).T).T
+    outline[:, 0] = (outline[:, 0] + px) / s_scale
+    outline[:, 1] = (outline[:, 1] + py) / s_scale
+    corners = np.array([[0.0, 0.0], [mw, 0.0], [mw, mh], [0.0, mh]], dtype=np.float64)
+    ones4 = np.ones((4, 1), dtype=np.float64)
+    box = (matrix @ np.hstack([corners, ones4]).T).T
+    box[:, 0] = (box[:, 0] + px) / s_scale
+    box[:, 1] = (box[:, 1] + py) / s_scale
+    top_local = main_local[int(np.argmin(main_local[:, 1]))].reshape(1, 2)
+    tip_anchor = (matrix @ np.hstack([top_local, np.ones((1, 1))]).T).T[0]
+    tip_anchor[0] = (tip_anchor[0] + px) / s_scale
+    tip_anchor[1] = (tip_anchor[1] + py) / s_scale
+    center = outline.mean(axis=0)
+    outward = tip_anchor - center
+    norm = float(np.hypot(outward[0], outward[1])) or 1.0
+    tip_end = tip_anchor + outward * (12.0 / norm)
+    return {
+        "confidence": float(score),
+        "x": float(center[0]),
+        "y": float(center[1]),
+        "width": float(mw) / s_scale,
+        "height": float(mh) / s_scale,
+        "angle": float(angle),
+        "box": box.tolist(),
+        "outline": outline.tolist(),
+        "outlines": [outline.tolist()],
+        "tip": [tip_anchor.tolist(), tip_end.tolist()],
+        "method": "template",
+    }
+
+
+def _refine_template_hit(
+    search: np.ndarray,
+    model: np.ndarray,
+    model_edges: np.ndarray | None,
+    hit: dict,
+    opencl: bool = False,
+) -> dict:
+    """Full-resolution polish around a pyramid hit — lifts borderline rotated scores."""
+    if hit is None:
+        return hit
+    angle0 = float(hit.get("angle") or 0)
+    edges = model_edges if model_edges is not None and model_edges.size else _edges(model)
+    model_f, edges_f = _fit_model_into_search(model, edges, search, [angle0 - 4, angle0, angle0 + 4])
+    search_e = _edges(search)
+    best = hit
+    for scale in (0.85, 0.92, 1.0, 1.06):
+        mw = max(8, int(round(model_f.shape[1] * scale)))
+        mh = max(8, int(round(model_f.shape[0] * scale)))
+        scaled = cv2.resize(model_f, (mw, mh), interpolation=cv2.INTER_LINEAR)
+        scaled_e = cv2.resize(edges_f, (mw, mh), interpolation=cv2.INTER_NEAREST)
+        for angle in (angle0 - 2, angle0 - 1, angle0, angle0 + 1, angle0 + 2):
+            templ, matrix = _rotate_template(scaled, angle)
+            templ_e, _ = _rotate_template(scaled_e, angle, nearest=True)
+            if templ.shape[0] >= search.shape[0] or templ.shape[1] >= search.shape[1]:
+                continue
+            score_g, px_g, py_g = _match_template_once(search, templ, opencl)
+            score_e, px_e, py_e = _match_template_once(search_e, templ_e, opencl)
+            score = max(0.0, float(score_g))
+            if score_e >= 0.22 and abs(px_e - px_g) <= 4 and abs(py_e - py_g) <= 4:
+                score = float(0.60 * score_g + 0.40 * max(0.0, score_e))
+            if score <= float(best.get("confidence") or 0) + 1e-6:
+                continue
+            cand = _build_hit_from_match(scaled, matrix, px_g, py_g, angle, score, 1.0)
+            cand["method"] = "template"
+            best = cand
     return best
 
 
@@ -625,7 +745,7 @@ class ShapeSearchTool(Tool):
         return {
             "search_roi": None,
             "min_confidence": 0.55,
-            "angle_range": "20",
+            "angle_range": "45",
             "angle_step": "2",
             "accel_device": "cpu",
         }
@@ -662,6 +782,9 @@ class ShapeSearchTool(Tool):
                 "elapsed_ms": (time.perf_counter() - started) * 1000.0,
             }, image
 
+        span = int(cfg.get("angle_range") or 0)
+        step = float(cfg.get("angle_step") or 2)
+        angles = _angle_list(span, step)
         x0, y0, x1, y1 = _roi_box(image, cfg.get("search_roi"))
         search = _gray(image[y0:y1, x0:x1])
         model_edges = self._load_model_edges(project_id, tool_id)
@@ -675,10 +798,6 @@ class ShapeSearchTool(Tool):
                     interpolation=cv2.INTER_NEAREST,
                 )
 
-        span = int(cfg.get("angle_range") or 0)
-        step = float(cfg.get("angle_step") or 2)
-        angles = _angle_list(span, step)
-
         best = _match_features(search, model_gray)
         # If SIFT found a rotated pose outside the configured sweep, add a local window.
         if best is not None:
@@ -689,6 +808,8 @@ class ShapeSearchTool(Tool):
         # OpenCL matchTemplate invents near-perfect scores at the wrong scale/angle.
         # Keep template on CPU.
         templ = _match_template_pyramid(search, model_gray, angles, False, model_edges)
+        if templ is not None:
+            templ = _refine_template_hit(search, model_gray, model_edges, templ, False)
         best = _pick_best_match(best, templ, model_gray.shape)
 
         elapsed = (time.perf_counter() - started) * 1000.0
