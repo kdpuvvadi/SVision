@@ -64,21 +64,48 @@ def _content_mask(gray: np.ndarray) -> np.ndarray:
     return mask
 
 
-def _trim_model(gray: np.ndarray, pad: int = 2) -> np.ndarray:
-    """Drop flat border so matching focuses on the pattern."""
+def _trim_bbox(gray: np.ndarray, pad: int = 2) -> tuple[int, int, int, int] | None:
+    """Content bounding box, or None if the image should stay full-frame."""
     if gray.size == 0:
-        return gray
+        return None
     mask = _content_mask(gray)
     if not np.any(mask):
-        return gray
+        return None
     ys, xs = np.where(mask > 0)
     y0 = max(0, int(ys.min()) - pad)
     y1 = min(gray.shape[0], int(ys.max()) + pad + 1)
     x0 = max(0, int(xs.min()) - pad)
     x1 = min(gray.shape[1], int(xs.max()) + pad + 1)
     if (x1 - x0) < 8 or (y1 - y0) < 8:
+        return None
+    return y0, y1, x0, x1
+
+
+def _trim_model(gray: np.ndarray, pad: int = 2) -> np.ndarray:
+    """Drop flat border so matching focuses on the pattern."""
+    box = _trim_bbox(gray, pad=pad)
+    if box is None:
         return gray
+    y0, y1, x0, x1 = box
     return gray[y0:y1, x0:x1]
+
+
+def _trim_model_pair(
+    gray: np.ndarray,
+    edges: np.ndarray | None,
+    pad: int = 2,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """Trim gray + edges with the same crop so rotation overlays stay aligned."""
+    box = _trim_bbox(gray, pad=pad)
+    if box is None:
+        return gray, edges
+    y0, y1, x0, x1 = box
+    g = gray[y0:y1, x0:x1]
+    if edges is None or edges.size == 0:
+        return g, edges
+    if edges.shape[:2] != gray.shape[:2]:
+        edges = cv2.resize(edges, (gray.shape[1], gray.shape[0]), interpolation=cv2.INTER_NEAREST)
+    return g, edges[y0:y1, x0:x1]
 
 
 def _model_outlines(gray: np.ndarray) -> list[np.ndarray]:
@@ -142,7 +169,12 @@ def _downscale(gray: np.ndarray, max_edge: int) -> tuple[np.ndarray, float]:
     return out, scale
 
 
-def _rotate_template(gray: np.ndarray, angle: float) -> tuple[np.ndarray, np.ndarray]:
+def _rotate_template(
+    gray: np.ndarray,
+    angle: float,
+    *,
+    nearest: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
     h, w = gray.shape[:2]
     if abs(angle) < 0.05:
         matrix = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float64)
@@ -154,7 +186,8 @@ def _rotate_template(gray: np.ndarray, angle: float) -> tuple[np.ndarray, np.nda
     nh = int(h * cos + w * sin)
     matrix[0, 2] += (nw - w) / 2.0
     matrix[1, 2] += (nh - h) / 2.0
-    out = cv2.warpAffine(gray, matrix, (nw, nh), flags=cv2.INTER_LINEAR, borderValue=0)
+    flags = cv2.INTER_NEAREST if nearest else cv2.INTER_LINEAR
+    out = cv2.warpAffine(gray, matrix, (nw, nh), flags=flags, borderValue=0)
     return out, matrix
 
 
@@ -423,36 +456,39 @@ def _match_template_pyramid(
         mw = max(8, int(round(mw0 * scale)))
         mh = max(8, int(round(mh0 * scale)))
         scaled = cv2.resize(model_s, (mw, mh), interpolation=cv2.INTER_LINEAR)
-        scaled_e = cv2.resize(edges_s, (mw, mh), interpolation=cv2.INTER_LINEAR)
+        scaled_e = cv2.resize(edges_s, (mw, mh), interpolation=cv2.INTER_NEAREST)
         for angle in angles:
             templ, matrix = _rotate_template(scaled, angle)
-            templ_e, _ = _rotate_template(scaled_e, angle)
+            templ_e, _ = _rotate_template(scaled_e, angle, nearest=True)
             if templ.shape[0] >= search_s.shape[0] or templ.shape[1] >= search_s.shape[1]:
                 continue
             score_g, px_g, py_g = _match_template_once(search_s, templ, opencl)
-            score_e, px, py = _match_template_once(search_e, templ_e, opencl)
-            # Solid-model correlation is edge-led; gray breaks ties.
-            if score_e >= 0.15:
-                score = float(0.75 * max(0.0, score_e) + 0.25 * max(0.0, score_g))
-                if abs(px_g - px) > 3 or abs(py_g - py) > 3:
-                    # Prefer the gray peak if edges drifted.
-                    if score_g > score_e:
-                        score = float(score_g)
-                        px, py = px_g, py_g
-            else:
-                score = max(0.0, float(score_g))
-                px, py = px_g, py_g
+            score_e, px_e, py_e = _match_template_once(search_e, templ_e, opencl)
+            # Gray owns pose under rotation — edge maps smear and invent peaks.
+            # Only blend edges when their peak sits on the same hit.
+            px, py = px_g, py_g
+            score = max(0.0, float(score_g))
+            if (
+                score_e >= 0.22
+                and abs(px_e - px_g) <= 4
+                and abs(py_e - py_g) <= 4
+            ):
+                score = float(0.60 * score_g + 0.40 * max(0.0, score_e))
             if best is not None:
-                # OpenCL matchTemplate often spikes a near-perfect score at ±step on
-                # an untilted part. Demand a real gain before accepting more rotation.
                 gain = score - float(best["confidence"])
-                more_rotated = abs(angle) > abs(float(best["angle"])) + 1e-6
-                if more_rotated and gain < 0.02:
+                # Near-ties keep the smaller |angle| (suppresses ±step flicker).
+                # Real rotation must still win when it scores clearly higher.
+                if gain < -1e-9:
                     continue
-                if gain <= 0:
+                if gain < 0.012 and abs(angle) >= abs(float(best["angle"])) - 1e-6:
                     continue
-            # Contours in the pre-rotation scaled model, then through the same warp used for matching.
+            # Prefer the largest silhouette for overlay — tiny debris rings look broken when rotated.
             outline_locals = _model_outlines(scaled)
+            main_local = max(
+                outline_locals,
+                key=lambda pts: float(cv2.contourArea(pts.astype(np.float32))),
+            )
+            outline_locals = [main_local]
             outlines = []
             for outline_local in outline_locals:
                 ones = np.ones((len(outline_local), 1), dtype=np.float64)
@@ -461,22 +497,17 @@ def _match_template_pyramid(
                 outline[:, 1] = (outline[:, 1] + py) / s_scale
                 outlines.append(outline)
             all_pts = np.vstack(outlines) if outlines else np.zeros((0, 2), dtype=np.float64)
-            box = _oriented_box_points(all_pts)
-            if box.shape[0] < 4:
-                corners = np.array([[0.0, 0.0], [mw, 0.0], [mw, mh], [0.0, mh]], dtype=np.float64)
-                ones4 = np.ones((4, 1), dtype=np.float64)
-                box = (matrix @ np.hstack([corners, ones4]).T).T
-                box[:, 0] = (box[:, 0] + px) / s_scale
-                box[:, 1] = (box[:, 1] + py) / s_scale
-            main_local = max(
-                outline_locals,
-                key=lambda pts: float(cv2.contourArea(pts.astype(np.float32))),
-            )
+            # Oriented model rectangle (stable under rotation) — always available for overlay.
+            corners = np.array([[0.0, 0.0], [mw, 0.0], [mw, mh], [0.0, mh]], dtype=np.float64)
+            ones4 = np.ones((4, 1), dtype=np.float64)
+            box = (matrix @ np.hstack([corners, ones4]).T).T
+            box[:, 0] = (box[:, 0] + px) / s_scale
+            box[:, 1] = (box[:, 1] + py) / s_scale
             top_local = main_local[int(np.argmin(main_local[:, 1]))].reshape(1, 2)
             tip_anchor = (matrix @ np.hstack([top_local, np.ones((1, 1))]).T).T[0]
             tip_anchor[0] = (tip_anchor[0] + px) / s_scale
             tip_anchor[1] = (tip_anchor[1] + py) / s_scale
-            center = all_pts.mean(axis=0)
+            center = all_pts.mean(axis=0) if all_pts.shape[0] else box.mean(axis=0)
             outward = tip_anchor - center
             norm = float(np.hypot(outward[0], outward[1])) or 1.0
             tip_end = tip_anchor + outward * (12.0 / norm)
@@ -510,19 +541,22 @@ def _pick_best_match(
 ) -> dict | None:
     """Choose pose + confidence from SIFT and template.
 
-    SIFT owns rotated/scaled pose. Template often scores the registered piece far
-    higher on low-texture models — use that score when both agree on location.
+    SIFT is the rotation authority when angles diverge. Template usually scores
+    the registered piece higher on low-texture models when angles agree.
     """
     if sift is None:
         return templ
     if templ is None:
         return sift
     if _poses_agree(sift, templ, model_shape):
-        # Same hit: take the stronger method's full pose (don't graft a high
-        # template score onto a drifted SIFT angle — that produced fake ±10°).
+        angle_delta = abs(float(sift.get("angle") or 0) - float(templ.get("angle") or 0))
+        # Divergent angles on the same part: keep SIFT pose (handles real rotation).
+        if angle_delta > 6.0 and float(sift["confidence"]) >= 0.35:
+            out = dict(sift)
+            out["method"] = "sift"
+            return out
         if float(templ["confidence"]) >= float(sift["confidence"]):
             out = dict(templ)
-            out["confidence"] = float(templ["confidence"])
             out["method"] = "sift+template" if float(sift["confidence"]) > 0.4 else "template"
             return out
         return sift
@@ -630,24 +664,30 @@ class ShapeSearchTool(Tool):
 
         x0, y0, x1, y1 = _roi_box(image, cfg.get("search_roi"))
         search = _gray(image[y0:y1, x0:x1])
-        model_gray = _trim_model(_gray(model))
+        model_edges = self._load_model_edges(project_id, tool_id)
+        model_gray, model_edges = _trim_model_pair(_gray(model), model_edges)
         if min(model_gray.shape[:2]) < 8:
             model_gray = _gray(model)
-        model_edges = self._load_model_edges(project_id, tool_id)
-        if model_edges is not None and model_edges.shape[:2] != model_gray.shape[:2]:
-            model_edges = cv2.resize(
-                model_edges,
-                (model_gray.shape[1], model_gray.shape[0]),
-                interpolation=cv2.INTER_AREA,
-            )
+            if model_edges is not None and model_edges.shape[:2] != model_gray.shape[:2]:
+                model_edges = cv2.resize(
+                    model_edges,
+                    (model_gray.shape[1], model_gray.shape[0]),
+                    interpolation=cv2.INTER_NEAREST,
+                )
 
         span = int(cfg.get("angle_range") or 0)
         step = float(cfg.get("angle_step") or 2)
         angles = _angle_list(span, step)
 
         best = _match_features(search, model_gray)
-        # OpenCL matchTemplate invents near-perfect scores at the wrong scale/angle
-        # on this stack (e.g. 1.0 @ 10° while CPU has 0.98 @ 0°). Keep template on CPU.
+        # If SIFT found a rotated pose outside the configured sweep, add a local window.
+        if best is not None:
+            sift_ang = float(best.get("angle") or 0)
+            if abs(sift_ang) > 0.5 and not any(abs(sift_ang - a) <= step * 0.75 for a in angles):
+                refine = [sift_ang + d for d in (-2 * step, -step, 0.0, step, 2 * step)]
+                angles = sorted({round(float(a), 3) for a in (angles + refine)})
+        # OpenCL matchTemplate invents near-perfect scores at the wrong scale/angle.
+        # Keep template on CPU.
         templ = _match_template_pyramid(search, model_gray, angles, False, model_edges)
         best = _pick_best_match(best, templ, model_gray.shape)
 
@@ -739,13 +779,26 @@ class ShapeSearchTool(Tool):
         view = image.copy()
         color = (40, 220, 160) if passed else (60, 60, 230)
         thick = max(2, int(round(min(view.shape[:2]) / 320)))
-        rings = found.get("outlines") or [found.get("outline") or found.get("box") or []]
-        all_pts = []
+        box = np.asarray(found.get("box") or [], dtype=np.float64)
+        # Always draw the oriented model box first — stays correct when the piece is rotated.
+        if box.shape[0] >= 4:
+            cv2.polylines(view, [np.int32(np.round(box))], True, color, thick, cv2.LINE_AA)
+        rings = found.get("outlines") or [found.get("outline") or []]
+        all_pts = [box] if box.shape[0] >= 4 else []
         for ring in rings:
             pts = np.asarray(ring, dtype=np.float64)
-            if pts.shape[0] >= 3:
-                cv2.polylines(view, [np.int32(np.round(pts))], True, color, thick, cv2.LINE_AA)
-                all_pts.append(pts)
+            if pts.shape[0] < 3:
+                continue
+            # Skip shattered debris rings that don't hug the hit box.
+            if box.shape[0] >= 4:
+                bc = box.mean(axis=0)
+                pc = pts.mean(axis=0)
+                if float(np.hypot(pc[0] - bc[0], pc[1] - bc[1])) > 0.75 * max(
+                    float(found.get("width") or 1), float(found.get("height") or 1)
+                ):
+                    continue
+            cv2.polylines(view, [np.int32(np.round(pts))], True, color, max(1, thick - 1), cv2.LINE_AA)
+            all_pts.append(pts)
         tip = np.asarray(found.get("tip") or [], dtype=np.float64)
         if tip.shape == (2, 2):
             p0 = (int(round(tip[0, 0])), int(round(tip[0, 1])))
