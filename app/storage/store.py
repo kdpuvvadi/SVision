@@ -499,39 +499,41 @@ class ProjectStore:
             crop = image[y0:y1, x0:x1]
         if crop.shape[0] < 8 or crop.shape[1] < 8:
             raise ValueError("Draw a larger region around the pattern.")
-        # Trim flat border so later overlays hug the pattern, not empty padding.
-        try:
-            from app.tools.shape_search import _trim_model
 
-            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
-            trimmed = _trim_model(gray, pad=1)
-            if trimmed.shape[0] >= 8 and trimmed.shape[1] >= 8 and trimmed.shape != gray.shape:
-                if crop.ndim == 3:
-                    # Re-apply the same crop window on color by matching trim offsets via gray.
-                    full = gray
-                    # Find trimmed window inside full by template match of trimmed.
-                    res = cv2.matchTemplate(full, trimmed, cv2.TM_SQDIFF)
-                    _, _, loc, _ = cv2.minMaxLoc(res)
-                    tx, ty = int(loc[0]), int(loc[1])
-                    crop = crop[ty : ty + trimmed.shape[0], tx : tx + trimmed.shape[1]]
-                else:
-                    crop = trimmed
-        except Exception:
-            pass
+        from app.tools.shape_search import build_solid_model
+
+        solid = build_solid_model(crop)
         folder = _tool_dir(project_id, tool_id)
         folder.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(folder / "shape_model.png"), crop)
+        # Gray = matcher input; edges = solid figure; display = UI preview with green contours.
+        cv2.imwrite(str(folder / "shape_model.png"), solid["gray"])
+        cv2.imwrite(str(folder / "shape_model_edges.png"), solid["edges"])
+        cv2.imwrite(str(folder / "shape_model_display.png"), solid["display"])
+        meta = {
+            "width": solid["width"],
+            "height": solid["height"],
+            "edge_points": solid["edge_points"],
+            "figure_count": solid["figure_count"],
+            "figures": solid["figures"],
+            "angle": round(angle, 2),
+            "kind": "solid_edges",
+        }
+        (folder / "shape_model.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
         state = self._load_state(project_id, tool_id)
         ih, iw = image.shape[:2]
-        large = bool(crop.shape[0] * crop.shape[1] > 0.55 * ih * iw)
+        large = bool(solid["width"] * solid["height"] > 0.55 * ih * iw)
         state["shape_model"] = {
             "saved": True,
-            "width": int(crop.shape[1]),
-            "height": int(crop.shape[0]),
+            "kind": "solid_edges",
+            "width": solid["width"],
+            "height": solid["height"],
+            "edge_points": solid["edge_points"],
+            "figure_count": solid["figure_count"],
             "angle": round(angle, 2),
             "registered_at": _now(),
             "warning": (
-                "Selection covers most of the image. Draw tighter around the part so the overlay hugs it."
+                "Selection covers most of the image. Draw tighter around the part so the model hugs it."
                 if large
                 else ""
             ),
@@ -541,14 +543,23 @@ class ProjectStore:
 
     def delete_shape_model(self, project_id: str, tool_id: str) -> None:
         self._require_tool(project_id, tool_id)
-        path = _tool_dir(project_id, tool_id) / "shape_model.png"
-        path.unlink(missing_ok=True)
+        folder = _tool_dir(project_id, tool_id)
+        for name in (
+            "shape_model.png",
+            "shape_model_edges.png",
+            "shape_model_display.png",
+            "shape_model.json",
+        ):
+            (folder / name).unlink(missing_ok=True)
         state = self._load_state(project_id, tool_id)
         state["shape_model"] = {"saved": False}
         self._save_state(project_id, tool_id, state)
 
     def shape_model_path(self, project_id: str, tool_id: str) -> Path:
-        path = _tool_dir(project_id, tool_id) / "shape_model.png"
+        folder = _tool_dir(project_id, tool_id)
+        display = folder / "shape_model_display.png"
+        gray = folder / "shape_model.png"
+        path = display if display.exists() else gray
         if not path.exists():
             raise FileNotFoundError("Model image is not saved.")
         return path

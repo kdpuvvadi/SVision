@@ -262,13 +262,28 @@ function renderEditor() {
 }
 
 function settingTabs(spec) {
-  const tabs = [{ key: "name", label: "Name" }];
-  for (const field of spec.fields || []) tabs.push({ key: field.key, label: field.label, field });
+  const tabs = [];
+  // Panels first (Model / Connect) — Omron-style tool editors lead with setup panels.
   const labels = spec.panel_labels || {};
   for (const name of spec.panels || []) {
     const label = labels[name] || window.SVisionTools?.panelLabel?.(name, name) || name;
     tabs.push({ key: `panel:${name}`, label, panel: name });
   }
+  // Fields with the same `tab` share one settings page (e.g. Measurement).
+  const seen = new Set();
+  for (const field of spec.fields || []) {
+    const tabId = field.tab || field.key;
+    if (seen.has(tabId)) continue;
+    seen.add(tabId);
+    const group = (spec.fields || []).filter((f) => (f.tab || f.key) === tabId);
+    tabs.push({
+      key: `fields:${tabId}`,
+      label: field.tab_label || field.label,
+      fields: group,
+      field: group.length === 1 ? group[0] : null,
+    });
+  }
+  tabs.push({ key: "name", label: "Name" });
   tabs.push({ key: "help", label: "Help" });
   return tabs;
 }
@@ -312,11 +327,13 @@ function renderOptionsInto(panel) {
   const active = tabs.find((tab) => tab.key === state.settingTab);
   const body = active.key === "help"
     ? helpHtml(spec, tool)
-    : active.field
-      ? fieldHtml(tool, active.field)
-      : active.panel
-        ? panelHtml(tool, active.panel)
-        : `<label>Name<input data-name type="text" value="${escapeHtml(toolDisplayName(tool))}" placeholder="${escapeHtml(spec.title)}" /></label>`;
+    : active.fields?.length
+      ? `<div class="setting-fields">${active.fields.map((field) => fieldHtml(tool, field)).join("")}</div>`
+      : active.field
+        ? fieldHtml(tool, active.field)
+        : active.panel
+          ? panelHtml(tool, active.panel)
+          : `<label>Name<input data-name type="text" value="${escapeHtml(toolDisplayName(tool))}" placeholder="${escapeHtml(spec.title)}" /></label>`;
   panel.dataset.toolId = tool.id;
   if (!(tool.name || "").trim() || (tool.name === "Camera" && tool.type !== "camera")) tool.name = spec.title;
   panel.innerHTML = `
@@ -328,7 +345,10 @@ function renderOptionsInto(panel) {
       </div>
       <div class="setting-body">${body}</div>
     </div>`;
-  if (active.field?.kind === "roi") drawRoiCanvas();
+  const roiField = active.field?.kind === "roi"
+    ? active.field
+    : (active.fields || []).find((f) => f.kind === "roi");
+  if (roiField) drawRoiCanvas();
   if (active.panel) {
     const plugin = window.SVisionTools?.panel?.(active.panel);
     if (plugin?.mount) plugin.mount(tool);

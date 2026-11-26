@@ -17,7 +17,10 @@
 
 from __future__ import annotations
 
+import json
 import time
+from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
@@ -28,6 +31,7 @@ from app.tools.base import Tool
 from app.tools.registry import register
 
 _model_cache: dict[str, tuple[float, np.ndarray]] = {}
+_meta_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _SIFT_MAX_EDGE = 960
 _TEMPLATE_MAX_EDGE = 480
 
@@ -177,6 +181,57 @@ def _edges(gray: np.ndarray) -> np.ndarray:
     return cv2.Canny(blur, 40, 120)
 
 
+def build_solid_model(crop: np.ndarray) -> dict[str, Any]:
+    """Build an Omron-style shape model from the selected region.
+
+    The registered figure is the edge/contour set extracted inside the box — not
+    only the raw pixels. Matching and overlays use that solid shape.
+    """
+    gray = _gray(crop)
+    gray = _trim_model(gray, pad=1)
+    if min(gray.shape[:2]) < 8:
+        raise ValueError("Draw a larger region around the pattern.")
+    blur = cv2.GaussianBlur(gray, (3, 3), 0)
+    edges = cv2.Canny(blur, 40, 120)
+    # Strengthen thin edges so the registered figure is visible and matchable.
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=1)
+    contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+    h, w = gray.shape[:2]
+    min_len = max(12, int(0.04 * (w + h)))
+    figures: list[list[list[float]]] = []
+    for contour in contours:
+        if len(contour) < min_len:
+            continue
+        peri = float(cv2.arcLength(contour, True))
+        approx = cv2.approxPolyDP(contour, max(0.8, 0.004 * peri), True)
+        pts = approx.reshape(-1, 2).astype(np.float64)
+        if pts.shape[0] < 3:
+            continue
+        figures.append([[float(p[0]), float(p[1])] for p in pts])
+    if not figures:
+        # Fall back to content outline so registration never stores an empty model.
+        for ring in _model_outlines(gray):
+            figures.append([[float(p[0]), float(p[1])] for p in ring])
+            edges = np.zeros_like(gray)
+            cv2.polylines(edges, [np.int32(np.round(ring))], True, 255, 1)
+    # Display image: gray part with cyan edge figure (Omron-style "model image").
+    display = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    for fig in figures:
+        cv2.polylines(display, [np.int32(np.round(np.asarray(fig)))], True, (40, 220, 160), 1, cv2.LINE_AA)
+    edge_points = int(np.count_nonzero(edges))
+    return {
+        "gray": gray,
+        "edges": edges,
+        "display": display,
+        "figures": figures,
+        "width": int(w),
+        "height": int(h),
+        "edge_points": edge_points,
+        "figure_count": len(figures),
+    }
+
+
 def _match_template_once(search: np.ndarray, templ: np.ndarray, opencl: bool) -> tuple[float, int, int]:
     if templ.shape[0] >= search.shape[0] or templ.shape[1] >= search.shape[1]:
         return -1.0, 0, 0
@@ -299,19 +354,22 @@ def _match_template_pyramid(
     model: np.ndarray,
     angles: list[float],
     opencl: bool,
+    model_edges: np.ndarray | None = None,
 ) -> dict | None:
-    """Fallback for small / low-texture models where SIFT has too few keypoints."""
+    """Edge-first correlation (Omron-style), with gray assist."""
     search_s, s_scale = _downscale(search, _TEMPLATE_MAX_EDGE)
     target_w = max(8, int(round(model.shape[1] * s_scale)))
     target_h = max(8, int(round(model.shape[0] * s_scale)))
     model_s = cv2.resize(model, (target_w, target_h), interpolation=cv2.INTER_AREA)
+    if model_edges is not None and model_edges.size:
+        edges_s = cv2.resize(model_edges, (target_w, target_h), interpolation=cv2.INTER_AREA)
+    else:
+        edges_s = _edges(model_s)
     if model_s.shape[0] >= search_s.shape[0] or model_s.shape[1] >= search_s.shape[1]:
         fit = 0.55 * min(search_s.shape[0] / model_s.shape[0], search_s.shape[1] / model_s.shape[1])
-        model_s = cv2.resize(
-            model_s,
-            (max(8, int(model_s.shape[1] * fit)), max(8, int(model_s.shape[0] * fit))),
-            interpolation=cv2.INTER_AREA,
-        )
+        new_size = (max(8, int(model_s.shape[1] * fit)), max(8, int(model_s.shape[0] * fit)))
+        model_s = cv2.resize(model_s, new_size, interpolation=cv2.INTER_AREA)
+        edges_s = cv2.resize(edges_s, new_size, interpolation=cv2.INTER_AREA)
 
     search_e = _edges(search_s)
     scales = [0.90, 0.95, 1.0, 1.05, 1.10]
@@ -321,16 +379,25 @@ def _match_template_pyramid(
         mw = max(8, int(round(mw0 * scale)))
         mh = max(8, int(round(mh0 * scale)))
         scaled = cv2.resize(model_s, (mw, mh), interpolation=cv2.INTER_LINEAR)
+        scaled_e = cv2.resize(edges_s, (mw, mh), interpolation=cv2.INTER_LINEAR)
         for angle in angles:
             templ, matrix = _rotate_template(scaled, angle)
+            templ_e, _ = _rotate_template(scaled_e, angle)
             if templ.shape[0] >= search_s.shape[0] or templ.shape[1] >= search_s.shape[1]:
                 continue
-            score_g, px, py = _match_template_once(search_s, templ, opencl)
-            score_e, px_e, py_e = _match_template_once(search_e, _edges(templ), opencl)
-            score = max(0.0, float(score_g))
-            if score_e > score and abs(px_e - px) <= 2 and abs(py_e - py) <= 2:
-                score = float(score_e)
-                px, py = px_e, py_e
+            score_g, px_g, py_g = _match_template_once(search_s, templ, opencl)
+            score_e, px, py = _match_template_once(search_e, templ_e, opencl)
+            # Solid-model correlation is edge-led; gray breaks ties.
+            if score_e >= 0.15:
+                score = float(0.75 * max(0.0, score_e) + 0.25 * max(0.0, score_g))
+                if abs(px_g - px) > 3 or abs(py_g - py) > 3:
+                    # Prefer the gray peak if edges drifted.
+                    if score_g > score_e:
+                        score = float(score_g)
+                        px, py = px_g, py_g
+            else:
+                score = max(0.0, float(score_g))
+                px, py = px_g, py_g
             if best is not None:
                 # OpenCL matchTemplate often spikes a near-perfect score at ±step on
                 # an untilted part. Demand a real gain before accepting more rotation.
@@ -420,23 +487,25 @@ def _pick_best_match(
 class ShapeSearchTool(Tool):
     type = "shape_search"
     title = "Shape Search"
-    summary = "Register a pattern, then find its pose (position, angle, scale) in the image."
+    summary = "Register a solid edge model from a selected region, then find its pose in the image."
     ui_modules = ["/static/tools/accel.js", "/static/tools/shape_search.js"]
 
     def fields(self) -> list[dict]:
+        meas = {"tab": "measurement", "tab_label": "Measurement"}
         return [
-            {"key": "search_roi", "label": "Search region", "kind": "roi"},
+            {"key": "search_roi", "label": "Region setting", "kind": "roi"},
             {
                 "key": "min_confidence",
-                "label": "Minimum confidence",
+                "label": "Correlation (min)",
                 "kind": "range",
                 "min": 0.35,
                 "max": 0.95,
                 "step": 0.01,
+                **meas,
             },
             {
                 "key": "angle_range",
-                "label": "Template angle fallback",
+                "label": "Angle range",
                 "kind": "select",
                 "options": [
                     {"value": "0", "label": "No rotation"},
@@ -445,21 +514,24 @@ class ShapeSearchTool(Tool):
                     {"value": "45", "label": "±45 degrees"},
                     {"value": "90", "label": "±90 degrees"},
                 ],
+                **meas,
             },
             {
                 "key": "angle_step",
-                "label": "Template angle step",
+                "label": "Angle step",
                 "kind": "select",
                 "options": [
                     {"value": "5", "label": "5° (faster)"},
                     {"value": "2", "label": "2° (balanced)"},
                     {"value": "1", "label": "1° (finest)"},
                 ],
+                **meas,
             },
             {
                 "key": "accel_device",
                 "label": "Hardware acceleration",
                 "kind": "accel",
+                **meas,
             },
         ]
 
@@ -480,8 +552,8 @@ class ShapeSearchTool(Tool):
 
     def status(self) -> str:
         return (
-            "Open Model, grab/choose an image, draw tightly around the part, Register. "
-            "Search uses feature matching (rotation-aware); template match is the fallback."
+            "Model: draw a figure on the image and Register — SVision extracts the solid edge "
+            "shape inside that region (Omron-style), then searches for it."
         )
 
     def mount(self, app) -> None:
@@ -495,7 +567,8 @@ class ShapeSearchTool(Tool):
         name = tool.get("name") or self.title
         min_confidence = float(cfg.get("min_confidence", 0.55))
         accel = resolve_accel(cfg.get("accel_device") or "cpu")
-        model = self._load_model(project_id, tool.get("id", ""))
+        tool_id = tool.get("id", "")
+        model = self._load_model(project_id, tool_id)
         if model is None:
             return {
                 "id": tool.get("id"),
@@ -505,7 +578,7 @@ class ShapeSearchTool(Tool):
                 "confidence": 0.0,
                 "min_confidence": min_confidence,
                 "accel": accel.get("id", "cpu"),
-                "message": "Model image is not saved. Register a pattern on the Model tab.",
+                "message": "Solid model is not saved. Open Model, draw a figure, Register.",
                 "elapsed_ms": (time.perf_counter() - started) * 1000.0,
             }, image
 
@@ -514,6 +587,13 @@ class ShapeSearchTool(Tool):
         model_gray = _trim_model(_gray(model))
         if min(model_gray.shape[:2]) < 8:
             model_gray = _gray(model)
+        model_edges = self._load_model_edges(project_id, tool_id)
+        if model_edges is not None and model_edges.shape[:2] != model_gray.shape[:2]:
+            model_edges = cv2.resize(
+                model_edges,
+                (model_gray.shape[1], model_gray.shape[0]),
+                interpolation=cv2.INTER_AREA,
+            )
 
         span = int(cfg.get("angle_range") or 0)
         step = float(cfg.get("angle_step") or 2)
@@ -522,7 +602,7 @@ class ShapeSearchTool(Tool):
         best = _match_features(search, model_gray)
         # OpenCL matchTemplate invents near-perfect scores at the wrong scale/angle
         # on this stack (e.g. 1.0 @ 10° while CPU has 0.98 @ 0°). Keep template on CPU.
-        templ = _match_template_pyramid(search, model_gray, angles, False)
+        templ = _match_template_pyramid(search, model_gray, angles, False, model_edges)
         best = _pick_best_match(best, templ, model_gray.shape)
 
         elapsed = (time.perf_counter() - started) * 1000.0
@@ -599,9 +679,11 @@ class ShapeSearchTool(Tool):
             "outline": [[round(p[0], 1), round(p[1], 1)] for p in best["outline"]],
             "outlines": [[[round(p[0], 1), round(p[1], 1)] for p in ring] for ring in best["outlines"]],
             "pose": pose,
+            "correlation": round(best["confidence"] * 100.0, 4),
             "message": (
-                f"Pattern  confidence {best['confidence'] * 100:.1f}%  "
-                f"∠{best['angle']:.1f}°  ({method})"
+                f"Correlation {best['confidence'] * 100:.1f}  "
+                f"X {best['x']:.1f}  Y {best['y']:.1f}  "
+                f"Angle {best['angle']:.1f}°  ({method})"
             ),
             "elapsed_ms": elapsed,
         }, overlay
@@ -634,19 +716,40 @@ class ShapeSearchTool(Tool):
         return view
 
     @staticmethod
-    def _load_model(project_id: str, tool_id: str) -> np.ndarray | None:
-        from pathlib import Path
-
+    def _model_dir(project_id: str, tool_id: str) -> Path | None:
         from app.config import DATA_DIR
 
         candidates = [
-            DATA_DIR / "projects" / project_id / "tools" / tool_id / "shape_model.png",
-            Path(__file__).resolve().parents[2] / "data" / "projects" / project_id / "tools" / tool_id / "shape_model.png",
+            DATA_DIR / "projects" / project_id / "tools" / tool_id,
+            Path(__file__).resolve().parents[2] / "data" / "projects" / project_id / "tools" / tool_id,
         ]
-        path = next((p for p in candidates if p.exists()), None)
-        if path is None:
+        return next((p for p in candidates if (p / "shape_model.png").exists()), None)
+
+    @classmethod
+    def _load_model(cls, project_id: str, tool_id: str) -> np.ndarray | None:
+        folder = cls._model_dir(project_id, tool_id)
+        if folder is None:
             return None
-        key = f"{project_id}:{tool_id}:{path}"
+        path = folder / "shape_model.png"
+        key = f"gray:{project_id}:{tool_id}:{path}"
+        stamp = path.stat().st_mtime
+        cached = _model_cache.get(key)
+        if cached and cached[0] == stamp:
+            return cached[1]
+        image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+        if image is not None:
+            _model_cache[key] = (stamp, image)
+        return image
+
+    @classmethod
+    def _load_model_edges(cls, project_id: str, tool_id: str) -> np.ndarray | None:
+        folder = cls._model_dir(project_id, tool_id)
+        if folder is None:
+            return None
+        path = folder / "shape_model_edges.png"
+        if not path.exists():
+            return None
+        key = f"edges:{project_id}:{tool_id}:{path}"
         stamp = path.stat().st_mtime
         cached = _model_cache.get(key)
         if cached and cached[0] == stamp:

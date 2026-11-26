@@ -208,15 +208,8 @@
     const el = document.getElementById("modelRoiReadout");
     if (!el) return;
     const roi = state.modelRoi;
-    if (!roi) {
-      el.textContent = "No selection — drag to draw, then drag edges/corners or the rotate handle.";
-      return;
-    }
-    el.textContent =
-      `x ${(roi.x * 100).toFixed(1)}%  y ${(roi.y * 100).toFixed(1)}%  ` +
-      `w ${(roi.w * 100).toFixed(1)}%  h ${(roi.h * 100).toFixed(1)}%  ` +
-      `∠ ${angleOf(roi).toFixed(1)}°  · zoom ${view.zoom.toFixed(2)}×`;
-    setAngleInput(angleOf(roi));
+    el.textContent = figureReadout(roi) + (roi ? `  · zoom ${view.zoom.toFixed(2)}×` : "");
+    if (roi) setAngleInput(angleOf(roi));
   }
 
   function baseFit(canvas, iw, ih) {
@@ -439,6 +432,15 @@
   };
   window.drawModelCanvas = paint;
 
+  function figureReadout(roi) {
+    if (!roi) return "No registered figure — drag a rectangle on the image.";
+    const x0 = (roi.x * 100).toFixed(1);
+    const y0 = (roi.y * 100).toFixed(1);
+    const x1 = ((roi.x + roi.w) * 100).toFixed(1);
+    const y1 = ((roi.y + roi.h) * 100).toFixed(1);
+    return `Figure: Rectangle · UL ${x0}%, ${y0}% · LR ${x1}%, ${y1}% · ∠ ${angleOf(roi).toFixed(1)}°`;
+  }
+
   T.registerPanel("shape_model", {
     label: "Model",
     render(tool) {
@@ -451,31 +453,50 @@
         ? `/api/projects/${state.project.id}/tools/${tool.id}/shape-model?t=${encodeURIComponent(model.registered_at || "")}`
         : "";
       const ang = state.modelRoi ? angleOf(state.modelRoi) : 0;
-      const hint = live
-        ? "Grab a still and draw a tight box around the part only (not the whole frame). Rotate with the orange handle if needed, then Register."
-        : "Choose an image and draw a tight box around the part only. Avoid selecting most of the frame — the overlay follows the registered model.";
+      const solidBits = saved
+        ? `${model.figure_count || 0} figures · ${model.edge_points || 0} edge pts · ${model.width}×${model.height}`
+        : "";
       return `
-        <p class="hint">${hint}</p>
-        <div class="sample-actions model-toolbar">
-          ${live ? `<button id="grabModelCamera" type="button" class="primary">Grab from camera</button>` : ""}
-          <label class="file-btn">Choose image<input id="modelFile" type="file" accept="image/*" hidden /></label>
-          <button id="registerModel" type="button" ${live ? "" : 'class="primary"'}>Register</button>
-          <button id="deleteModel" type="button">Delete</button>
-          <button id="modelZoomIn" type="button" title="Zoom in">+</button>
-          <button id="modelZoomOut" type="button" title="Zoom out">−</button>
-          <button id="modelZoomReset" type="button" title="Reset view">1:1</button>
-          <button id="modelClearRoi" type="button">Clear box</button>
-        </div>
-        <div class="roi-row model-angle-row">
-          <span>Angle</span>
-          <input id="modelBoxAngle" type="number" min="-180" max="180" step="0.5" value="${ang}" />
-          <span class="hint">degrees · drag the orange handle to rotate</span>
-        </div>
-        <p id="grabModelStatus" class="hint">${live ? "Camera is live — Grab captures a still for the model." : ""}</p>
-        <p id="modelRoiReadout" class="hint model-roi-readout">No selection</p>
-        <div class="roi-stage model-stage"><canvas id="modelCanvas" width="720" height="420"></canvas></div>
-        <div class="model-status ${saved ? (model.warning ? "warn" : "") : "warn"}">${saved ? `Registered model ${model.width}×${model.height}${model.warning ? ` — ${model.warning}` : ""}` : "Model image is not saved."}</div>
-        ${saved ? `<img class="model-preview" src="${src}" alt="Registered model" />` : ""}`;
+        <div class="model-editor">
+          <section class="model-block">
+            <h3>Input image</h3>
+            <p class="hint">Draw a rectangle around the part. Register extracts the <b>solid edge model</b> inside that figure (not just a bitmap crop).</p>
+            <div class="sample-actions model-toolbar">
+              ${live ? `<button id="grabModelCamera" type="button" class="primary">Grab from camera</button>` : ""}
+              <label class="file-btn">Choose image<input id="modelFile" type="file" accept="image/*" hidden /></label>
+              <button id="modelZoomIn" type="button" title="Zoom in">+</button>
+              <button id="modelZoomOut" type="button" title="Zoom out">−</button>
+              <button id="modelZoomReset" type="button" title="Reset view">1:1</button>
+            </div>
+            <p id="grabModelStatus" class="hint">${live ? "Camera is live — Grab captures a still for model registration." : ""}</p>
+          </section>
+
+          <section class="model-block">
+            <h3>Registered figure</h3>
+            <div class="sample-actions model-toolbar">
+              <button id="registerModel" type="button" class="primary">Register model</button>
+              <button id="modelClearRoi" type="button">Clear figure</button>
+              <button id="deleteModel" type="button">Delete</button>
+            </div>
+            <div class="roi-row model-angle-row">
+              <span>Figure angle</span>
+              <input id="modelBoxAngle" type="number" min="-180" max="180" step="0.5" value="${ang}" />
+              <span class="hint">deg · orange handle rotates the figure</span>
+            </div>
+            <p id="modelRoiReadout" class="hint model-roi-readout">${figureReadout(state.modelRoi)}</p>
+            <div class="roi-stage model-stage"><canvas id="modelCanvas" width="720" height="420"></canvas></div>
+          </section>
+
+          <section class="model-block">
+            <h3>Registered model</h3>
+            <div class="model-status ${saved ? (model.warning ? "warn" : "ok") : "warn"}">
+              ${saved
+                ? `Solid edge model saved · ${solidBits}${model.warning ? ` — ${escapeHtml(model.warning)}` : ""}`
+                : "No solid model yet. Draw a figure and Register."}
+            </div>
+            ${saved ? `<img class="model-preview model-preview-lg" src="${src}" alt="Registered solid model" />` : ""}
+          </section>
+        </div>`;
     },
     mount() {
       bindEditor();
@@ -505,10 +526,17 @@
   });
 
   T.registerDetail("shape_search", (tool) => {
-    let detail = tool.message || "No shape";
-    if (tool.x != null) detail += `  x ${tool.x}  y ${tool.y}  angle ${tool.angle}°`;
-    if (tool.method) detail += `  · ${tool.method}`;
-    if (tool.accel) detail += `  · ${tool.accel}`;
-    return detail;
+    if (tool.judgment == null && tool.confidence == null) return tool.message || "No measurement";
+    const corr = tool.correlation != null
+      ? Number(tool.correlation).toFixed(1)
+      : (Number(tool.confidence || 0) * 100).toFixed(1);
+    const bits = [
+      `Judge ${tool.judgment || "—"}`,
+      `Correlation ${corr}`,
+    ];
+    if (tool.x != null) bits.push(`X ${tool.x}`);
+    if (tool.y != null) bits.push(`Y ${tool.y}`);
+    if (tool.angle != null) bits.push(`Angle ${tool.angle}`);
+    return bits.join("  ·  ");
   });
 })();
