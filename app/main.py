@@ -21,7 +21,7 @@ import base64
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -472,6 +472,13 @@ def socket_test_page() -> FileResponse:
     return FileResponse(STATIC / "socket_test.html")
 
 
+@app.websocket("/ws/socket-test")
+async def socket_test_ws(websocket: WebSocket, host: str | None = None, port: int | None = None) -> None:
+    from app.core.socket_test_bridge import socket_test_session
+
+    await socket_test_session(websocket, host=host, port=port)
+
+
 def main() -> None:
     import logging
     import sys
@@ -499,11 +506,13 @@ def main() -> None:
     print(f"  Local:   http://127.0.0.1:{PORT}")
     for ip in ips:
         print(f"  Network: http://{ip}:{PORT}   (open this on another PC)")
+    print(f"  Socket:  http://127.0.0.1:{PORT}/socket-test")
     print(f"  Threads: {THREAD_COUNT}")
     print(f"  Data:    {DATA_DIR}")
     print("Close this window to stop SVision.")
     if getattr(sys, "frozen", False):
         threading.Timer(1.2, lambda: webbrowser.open(f"http://127.0.0.1:{PORT}")).start()
+        threading.Timer(1.4, lambda: webbrowser.open_new(f"http://127.0.0.1:{PORT}/socket-test")).start()
         uvicorn.run(app, host=HOST, port=PORT, reload=False, workers=1)
         return
     uvicorn.run("app.main:app", host=HOST, port=PORT, reload=False)

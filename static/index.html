@@ -135,6 +135,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
               <label>Port<input id="plcSocketPort" type="number" min="1" max="65535" /></label>
               <div id="socketServerInfo" class="comm-server-box hint"></div>
               <p class="hint">Clients receive newline-delimited JSON (scene, tools, per-tool results, final judgment). Send <code>{"cmd":"trigger"}</code> or <code>TRIGGER</code> to measure.</p>
+              <p class="hint"><a href="/socket-test" target="_blank" rel="noopener">Open Socket test UI</a> in a new window (also opened by <code>run.bat</code>).</p>
               <div id="socketStatus" class="plc-status hint"></div>
             </div>
             <div class="settings-panel" data-panel="mqtt" id="panelMqtt" hidden>

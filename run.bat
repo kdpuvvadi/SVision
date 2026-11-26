@@ -45,7 +45,7 @@ if errorlevel 2 (
   exit /b 1
 )
 
-rem Launch the TCP socket result viewer alongside SVision.
+rem Open Socket Test web UI in a new browser window once SVision is up.
 start "SVision Socket Test" /D "%~dp0" cmd /c "if exist .venv\Scripts\activate.bat call .venv\Scripts\activate.bat & python -m app.socket_test_ui"
 
 python -m app.main

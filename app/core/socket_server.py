@@ -9,15 +9,17 @@
 from __future__ import annotations
 
 import json
-import logging
 import socket
 import threading
 from typing import Any
 
-from app.core.handshake import handshake
 from app.config import lan_addresses
+from app.core.handshake import handshake
+from app.core.logutil import log as slog
 
-log = logging.getLogger("svision.socket")
+
+def _log(msg: str) -> None:
+    slog(f"[Socket] {msg}")
 
 
 class ResultSocketServer:
@@ -71,12 +73,12 @@ class ResultSocketServer:
             self._sock = sock
         except OSError as exc:
             self._status["error"] = str(exc)
-            log.error("socket bind failed: %s", exc)
+            _log(f"bind failed: {exc}")
             return
         self._thread = threading.Thread(target=self._serve, name="svision-socket", daemon=True)
         self._thread.start()
         self._status["running"] = True
-        log.info("result socket listening on %s:%s", host, port)
+        _log(f"listening on {host}:{port}")
 
     def stop(self) -> None:
         self._stop.set()
@@ -105,6 +107,7 @@ class ResultSocketServer:
         dead: list[socket.socket] = []
         with self._clients_lock:
             clients = list(self._clients)
+        _log(f"publish judgment={payload.get('judgment')} clients={len(clients)}")
         for client in clients:
             try:
                 client.sendall(line)
@@ -132,7 +135,7 @@ class ResultSocketServer:
             client.settimeout(0.5)
             with self._clients_lock:
                 self._clients.append(client)
-            log.info("socket client connected %s", addr)
+            _log(f"client connected {addr}")
             threading.Thread(
                 target=self._client_loop,
                 args=(client, addr),
@@ -169,7 +172,7 @@ class ResultSocketServer:
                 client.close()
             except OSError:
                 pass
-            log.info("socket client disconnected %s", addr)
+            _log(f"client disconnected {addr}")
 
     def _handle_line(self, line: str) -> None:
         if not line:
@@ -187,9 +190,9 @@ class ResultSocketServer:
         if cmd == "trigger":
             try:
                 ok = handshake.set_trigger(True)
-                log.info("socket trigger %s", "accepted" if ok else "ignored")
+                _log(f"trigger {'accepted' if ok else 'ignored'}")
             except Exception as exc:
-                log.warning("socket trigger failed: %s", exc)
+                _log(f"trigger failed: {exc}")
 
 
 result_socket = ResultSocketServer()
