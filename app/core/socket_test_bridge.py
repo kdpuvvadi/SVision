@@ -22,6 +22,29 @@ from app.core.socket_server import result_socket
 from app.storage.store import load_settings
 
 
+def _normalize_endpoint(host: Any = None, port: Any = None) -> tuple[str, int]:
+    """Sanitize host/port from the browser. Rejects corrupted values like 91080800."""
+    h = str(host or "").strip() or "127.0.0.1"
+    p_raw = port
+    if isinstance(h, str) and ":" in h and not h.startswith("["):
+        left, right = h.rsplit(":", 1)
+        if right.isdigit():
+            h = left.strip() or "127.0.0.1"
+            if p_raw in (None, "", 0, "0"):
+                p_raw = right
+    try:
+        # Digits only — avoids "9100" + "8080" style corruption surviving as int.
+        digits = "".join(ch for ch in str(p_raw if p_raw is not None else "9100") if ch.isdigit())
+        p = int(digits or "9100")
+    except (TypeError, ValueError):
+        p = 9100
+    if p < 1 or p > 65535 or p in {91080800, 91008080}:
+        p = 9100
+    if h in {"0.0.0.0", "::", ""}:
+        h = "127.0.0.1"
+    return h, p
+
+
 def _target_from_settings(host: str | None = None, port: int | None = None) -> tuple[str, int, dict[str, Any]]:
     plc = (load_settings().get("plc") or {})
     sock = plc.get("socket") if isinstance(plc.get("socket"), dict) else {}
@@ -29,13 +52,17 @@ def _target_from_settings(host: str | None = None, port: int | None = None) -> t
     # Prefer the live listener when running; fall back to saved settings.
     bind_host = str(status.get("host") or sock.get("host") or "0.0.0.0")
     if port is not None:
-        bind_port = int(port)
+        _, bind_port = _normalize_endpoint("127.0.0.1", port)
     elif status.get("running") and status.get("port"):
         bind_port = int(status.get("port") or 9100)
     else:
         bind_port = int(sock.get("port") or 9100)
-    # Clients never connect to 0.0.0.0 — use loopback.
-    connect_host = (host or "").strip() or ("127.0.0.1" if bind_host in {"0.0.0.0", "::"} else bind_host)
+    if bind_port < 1 or bind_port > 65535:
+        bind_port = 9100
+    connect_host, bind_port = _normalize_endpoint(
+        (host or "").strip() or ("127.0.0.1" if bind_host in {"0.0.0.0", "::"} else bind_host),
+        bind_port,
+    )
     info = {
         "enabled": bool(sock.get("enabled") or status.get("running")),
         "running": bool(status.get("running")),
@@ -150,21 +177,34 @@ async def socket_test_session(ws: WebSocket, host: str | None = None, port: int 
                 await _send(ws, {"type": "status", "connected": tcp is not None, "server": info, "message": "Status refreshed"})
             elif action == "connect":
                 await close_tcp()
-                connect_host, connect_port, info = _target_from_settings(msg.get("host"), msg.get("port"))
-                if msg.get("host"):
-                    connect_host = str(msg.get("host")).strip() or connect_host
-                if msg.get("port"):
-                    try:
-                        connect_port = int(msg.get("port"))
-                    except (TypeError, ValueError):
-                        pass
+                connect_host, connect_port = _normalize_endpoint(msg.get("host"), msg.get("port"))
+                _, _, info = _target_from_settings(connect_host, connect_port)
+                if not info.get("running"):
+                    # Start the TCP result server so Connect works without a manual Settings trip.
+                    from app.core.plc_runtime import plc_runtime
+                    from app.storage.store import save_settings
+
+                    await _send(ws, {"type": "log", "level": "warn", "message": "TCP server off — starting it…"})
+                    log(f"[SocketTest] auto-start TCP {connect_host}:{connect_port}")
+                    plc = load_settings().get("plc") or {}
+                    plc = dict(plc)
+                    plc["socket"] = {
+                        **(plc.get("socket") if isinstance(plc.get("socket"), dict) else {}),
+                        "enabled": True,
+                        "host": "0.0.0.0",
+                        "port": connect_port,
+                    }
+                    save_settings(plc=plc)
+                    plc_runtime.apply_settings(plc)
+                    await asyncio.sleep(0.35)
+                    _, _, info = _target_from_settings(connect_host, connect_port)
                 await _send(ws, {"type": "log", "level": "info", "message": f"Connecting TCP {connect_host}:{connect_port}…"})
                 log(f"[SocketTest] connect TCP {connect_host}:{connect_port}")
                 loop = asyncio.get_running_loop()
                 try:
                     sock = await loop.run_in_executor(
                         None,
-                        lambda: socket.create_connection((connect_host, connect_port), timeout=3.0),
+                        lambda h=connect_host, p=connect_port: socket.create_connection((h, p), timeout=3.0),
                     )
                     sock.settimeout(0.5)
                 except OSError as exc:

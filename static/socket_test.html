@@ -8,17 +8,16 @@ Copyright (C) 2026 KD Puvvadi
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>SVision · Socket test</title>
-  <link rel="stylesheet" href="/static/styles.css?v=32" />
+  <link rel="stylesheet" href="/static/styles.css?v=33" />
   <style>
     body.socket-test-page { overflow: auto; }
     .sock-wrap {
-      max-width: 1100px;
+      max-width: 1180px;
       margin: 0 auto;
       padding: 16px 16px 40px;
       display: flex;
       flex-direction: column;
       gap: 12px;
-      min-height: 100%;
     }
     .sock-bar {
       display: flex;
@@ -42,25 +41,18 @@ Copyright (C) 2026 KD Puvvadi
       border: 1px solid var(--line);
       border-radius: 6px;
       padding: 7px 10px;
-      min-width: 120px;
+      width: 140px;
+      color: var(--text);
     }
-    .sock-status {
-      margin-left: auto;
-      color: var(--muted);
-      font-size: 13px;
-      align-self: center;
-    }
+    .sock-status { margin-left: auto; color: var(--muted); font-size: 13px; align-self: center; }
     .sock-status.ok { color: var(--ok); }
     .sock-status.bad { color: var(--ng); }
     .sock-grid {
       display: grid;
-      grid-template-columns: 320px 1fr;
+      grid-template-columns: 1.2fr 0.8fr;
       gap: 12px;
-      min-height: 420px;
     }
-    @media (max-width: 860px) {
-      .sock-grid { grid-template-columns: 1fr; }
-    }
+    @media (max-width: 900px) { .sock-grid { grid-template-columns: 1fr; } }
     .sock-card {
       background: var(--panel);
       border: 1px solid var(--line);
@@ -68,33 +60,72 @@ Copyright (C) 2026 KD Puvvadi
       padding: 14px;
       display: flex;
       flex-direction: column;
-      gap: 8px;
+      gap: 10px;
       min-height: 0;
     }
-    .sock-card h2 { margin: 0; font-size: 14px; color: var(--muted); font-weight: 600; }
+    .sock-card h2 { margin: 0; font-size: 13px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+    .verdict-panel {
+      display: flex;
+      gap: 16px;
+      align-items: center;
+      padding: 16px 18px;
+      border-radius: 10px;
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+    }
+    .verdict-panel.OK { background: var(--ok-dim); border-color: #1a6b62; }
+    .verdict-panel.NG, .verdict-panel.ERROR { background: var(--ng-dim); border-color: #7a3038; }
     .judgment {
-      font-size: 42px;
+      font-size: 48px;
       font-weight: 700;
       line-height: 1;
-      letter-spacing: 0.02em;
+      min-width: 120px;
     }
     .judgment.OK { color: var(--ok); }
     .judgment.NG, .judgment.ERROR { color: var(--ng); }
-    .tool-table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 13px;
+    .verdict-meta { display: flex; flex-direction: column; gap: 4px; }
+    .verdict-meta .scene { font-size: 16px; font-weight: 600; }
+    .tool-list { display: flex; flex-direction: column; gap: 8px; }
+    .tool-row {
+      display: grid;
+      grid-template-columns: 1fr auto auto;
+      gap: 10px;
+      align-items: center;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: #0a0c0e;
+      border: 1px solid var(--line);
     }
-    .tool-table th, .tool-table td {
-      border-bottom: 1px solid var(--line);
-      padding: 7px 6px;
-      text-align: left;
+    .tool-row .name { font-weight: 600; }
+    .tool-row .type { color: var(--muted); font-size: 12px; }
+    .chip {
+      display: inline-block;
+      min-width: 44px;
+      text-align: center;
+      border-radius: 999px;
+      padding: 3px 10px;
+      font-size: 12px;
+      font-weight: 700;
+      border: 1px solid var(--line);
     }
-    .tool-table th { color: var(--muted); font-weight: 600; }
-    .json-box, .log-box {
-      flex: 1;
-      min-height: 180px;
-      max-height: 420px;
+    .chip.OK { color: var(--ok); background: var(--ok-dim); border-color: #1a6b62; }
+    .chip.NG, .chip.ERROR { color: var(--ng); background: var(--ng-dim); border-color: #7a3038; }
+    .chip.idle { color: var(--muted); }
+    .tool-ms { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; min-width: 52px; text-align: right; }
+    .empty-tools { color: var(--muted); padding: 12px 0; }
+    .stat-row { display: flex; flex-wrap: wrap; gap: 8px; }
+    .stat {
+      background: #0a0c0e;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 12px;
+      min-width: 90px;
+    }
+    .stat b { display: block; font-size: 18px; }
+    .stat span { color: var(--muted); font-size: 11px; }
+    .log-box {
+      min-height: 220px;
+      max-height: 360px;
       overflow: auto;
       background: #0a0c0e;
       border: 1px solid var(--line);
@@ -108,13 +139,26 @@ Copyright (C) 2026 KD Puvvadi
     .log-box .ok { color: var(--ok); }
     .log-box .warn { color: #e6b84d; }
     .log-box .error { color: var(--ng); }
-    .sock-top {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 12px;
+    details.json-details {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #0a0c0e;
+      padding: 8px 10px;
     }
-    .sock-top a { color: #9fd0ff; }
+    details.json-details summary {
+      cursor: pointer;
+      color: var(--muted);
+      font-size: 12px;
+      user-select: none;
+    }
+    details.json-details pre {
+      margin: 8px 0 0;
+      max-height: 240px;
+      overflow: auto;
+      font: 12px/1.45 ui-monospace, Consolas, monospace;
+      color: #d5dde6;
+      white-space: pre-wrap;
+    }
   </style>
 </head>
 <body class="socket-test-page">
@@ -133,19 +177,17 @@ Copyright (C) 2026 KD Puvvadi
   </header>
 
   <div class="sock-wrap">
-    <div class="sock-top">
-      <div>
-        <h1 style="margin:0;font-size:22px;">TCP socket result viewer</h1>
-        <p class="hint" style="margin:6px 0 0;">Connects through the live TCP result server (same JSON clients get). Open this page in as many windows as you need.</p>
-      </div>
+    <div>
+      <h1 style="margin:0;font-size:22px;">TCP socket result viewer</h1>
+      <p class="hint" style="margin:6px 0 0;">Connect talks to the live TCP result server. Connect will start the server if it is off. Open this page in as many windows as you need.</p>
     </div>
 
     <div class="sock-bar">
       <label>Host
-        <input id="host" type="text" value="127.0.0.1" />
+        <input id="sockHost" type="text" value="127.0.0.1" autocomplete="off" />
       </label>
       <label>Port
-        <input id="port" type="number" min="1" max="65535" value="9100" />
+        <input id="sockPort" type="text" inputmode="numeric" pattern="[0-9]*" value="9100" autocomplete="off" />
       </label>
       <button id="connectBtn" class="primary" type="button">Connect</button>
       <button id="triggerBtn" type="button" disabled>Trigger</button>
@@ -155,20 +197,31 @@ Copyright (C) 2026 KD Puvvadi
 
     <div class="sock-grid">
       <div class="sock-card">
-        <h2>Scene result</h2>
-        <div id="sceneName">Scene: —</div>
-        <div id="judgment" class="judgment">—</div>
-        <div id="elapsed" class="hint"></div>
-        <div id="message" class="hint"></div>
+        <h2>Inspection result</h2>
+        <div id="verdictPanel" class="verdict-panel">
+          <div id="judgment" class="judgment">—</div>
+          <div class="verdict-meta">
+            <div id="sceneName" class="scene">Scene: —</div>
+            <div id="elapsed" class="hint"></div>
+            <div id="message" class="hint">Waiting for a measure…</div>
+          </div>
+        </div>
+        <div class="stat-row">
+          <div class="stat"><b id="statOk">0</b><span>OK tools</span></div>
+          <div class="stat"><b id="statNg">0</b><span>NG tools</span></div>
+          <div class="stat"><b id="statCount">0</b><span>Images</span></div>
+          <div class="stat"><b id="statMs">—</b><span>Elapsed</span></div>
+        </div>
         <h2>Tools</h2>
-        <table class="tool-table">
-          <thead><tr><th>Tool</th><th>Result</th><th>ms</th></tr></thead>
-          <tbody id="toolsBody"></tbody>
-        </table>
+        <div id="toolList" class="tool-list">
+          <div class="empty-tools">No result yet. Connect, then Trigger or run Measure in SVision.</div>
+        </div>
+        <details class="json-details">
+          <summary>Raw JSON (for debugging)</summary>
+          <pre id="jsonBox">{}</pre>
+        </details>
       </div>
       <div class="sock-card">
-        <h2>JSON</h2>
-        <pre id="jsonBox" class="json-box">Waiting for a result…</pre>
         <h2>Logs</h2>
         <div id="logBox" class="log-box"></div>
       </div>
@@ -179,7 +232,7 @@ Copyright (C) 2026 KD Puvvadi
     const $ = (id) => document.getElementById(id);
     let ws = null;
     let tcpConnected = false;
-    let bridgeReady = false;
+    let connecting = false;
 
     function stamp() {
       const d = new Date();
@@ -194,33 +247,83 @@ Copyright (C) 2026 KD Puvvadi
       $("logBox").scrollTop = $("logBox").scrollHeight;
     }
 
+    function parseEndpoint() {
+      let host = ($("sockHost").value || "").trim() || "127.0.0.1";
+      let portRaw = ($("sockPort").value || "").trim();
+      // If host was pasted as host:port, split it.
+      if (host.includes(":") && !host.startsWith("[")) {
+        const idx = host.lastIndexOf(":");
+        const maybePort = host.slice(idx + 1);
+        if (/^\d+$/.test(maybePort)) {
+          if (!portRaw) portRaw = maybePort;
+          host = host.slice(0, idx);
+        }
+      }
+      // Digits only — kills junk like 91080800 from bad autofill/concat.
+      portRaw = String(portRaw).replace(/[^\d]/g, "");
+      let port = Number.parseInt(portRaw || "9100", 10);
+      if (!Number.isFinite(port) || port < 1 || port > 65535) {
+        throw new Error(`Invalid port "${($("sockPort").value || "").trim()}" — use 1–65535 (default 9100)`);
+      }
+      // Guard the exact bad value we saw from corrupted UI state.
+      if (port === 91080800 || port === 91008080) {
+        port = 9100;
+        $("sockPort").value = "9100";
+        addLog("warn", "Corrected corrupted port back to 9100");
+      }
+      $("sockHost").value = host;
+      $("sockPort").value = String(port);
+      return { host, port };
+    }
+
     function setStatus(text, ok) {
       const el = $("status");
       el.textContent = text;
       el.className = "sock-status " + (ok ? "ok" : "bad");
       $("triggerBtn").disabled = !ok;
       $("connectBtn").textContent = ok ? "Disconnect" : "Connect";
+      $("connectBtn").disabled = connecting && !ok;
       tcpConnected = !!ok;
     }
 
     function showResult(payload) {
       const scene = payload.scene || {};
-      $("sceneName").textContent = `Scene: ${scene.name || scene.id || "—"}`;
       const judgment = String(payload.judgment || "—");
+      $("sceneName").textContent = `Scene: ${scene.name || scene.id || "—"}`;
       $("judgment").textContent = judgment;
       $("judgment").className = "judgment " + judgment;
+      $("verdictPanel").className = "verdict-panel " + judgment;
       const elapsed = payload.elapsed_ms;
       $("elapsed").textContent = elapsed == null ? "" : `${Number(elapsed).toFixed(0)} ms`;
       $("message").textContent = payload.message || payload.error || "";
-      const body = $("toolsBody");
-      body.innerHTML = "";
-      for (const tool of payload.tools || []) {
-        const tr = document.createElement("tr");
-        tr.innerHTML = `<td>${escapeHtml(tool.name || tool.type || tool.id || "?")}</td>
-          <td>${escapeHtml(tool.judgment || "—")}</td>
-          <td>${Number(tool.elapsed_ms || 0).toFixed(0)}</td>`;
-        body.appendChild(tr);
+      $("statMs").textContent = elapsed == null ? "—" : `${Number(elapsed).toFixed(0)}`;
+      $("statCount").textContent = String(payload.count ?? (payload.results || []).length ?? 0);
+
+      const tools = payload.tools || [];
+      let ok = 0;
+      let ng = 0;
+      const list = $("toolList");
+      list.innerHTML = "";
+      if (!tools.length) {
+        list.innerHTML = `<div class="empty-tools">No tool results in this payload.</div>`;
       }
+      for (const tool of tools) {
+        const j = String(tool.judgment || "—");
+        if (j === "OK") ok += 1;
+        else if (j === "NG" || j === "ERROR") ng += 1;
+        const row = document.createElement("div");
+        row.className = "tool-row";
+        row.innerHTML = `
+          <div>
+            <div class="name">${escapeHtml(tool.name || tool.type || tool.id || "?")}</div>
+            <div class="type">${escapeHtml(tool.type || "")}${tool.message ? " · " + escapeHtml(tool.message) : ""}</div>
+          </div>
+          <span class="chip ${j === "OK" || j === "NG" || j === "ERROR" ? j : "idle"}">${escapeHtml(j)}</span>
+          <span class="tool-ms">${Number(tool.elapsed_ms || 0).toFixed(0)} ms</span>`;
+        list.appendChild(row);
+      }
+      $("statOk").textContent = String(ok);
+      $("statNg").textContent = String(ng);
       $("jsonBox").textContent = JSON.stringify(payload, null, 2);
     }
 
@@ -236,18 +339,16 @@ Copyright (C) 2026 KD Puvvadi
       if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
       const proto = location.protocol === "https:" ? "wss" : "ws";
       ws = new WebSocket(`${proto}://${location.host}/ws/socket-test`);
-      bridgeReady = false;
       addLog("info", "Opening bridge to SVision…");
       ws.onopen = () => {
-        bridgeReady = true;
         addLog("ok", "Bridge ready");
         $("linkInfo").textContent = location.host;
       };
       ws.onclose = () => {
-        bridgeReady = false;
         setStatus("Bridge closed", false);
         addLog("warn", "Bridge closed — refresh the page");
         ws = null;
+        connecting = false;
       };
       ws.onerror = () => addLog("error", "Bridge error");
       ws.onmessage = (ev) => {
@@ -255,10 +356,14 @@ Copyright (C) 2026 KD Puvvadi
         try { msg = JSON.parse(ev.data); } catch { return; }
         if (msg.type === "log") addLog(msg.level || "info", msg.message || "");
         if (msg.type === "status") {
+          connecting = false;
           setStatus(msg.message || (msg.connected ? "Connected" : "Disconnected"), !!msg.connected);
-          if (msg.server) {
-            if (!$("host").dataset.touched) $("host").value = msg.server.host || "127.0.0.1";
-            if (!$("port").dataset.touched) $("port").value = msg.server.port || 9100;
+          if (msg.server && msg.server.port && !$("sockPort").dataset.touched) {
+            const p = Number(msg.server.port);
+            if (p >= 1 && p <= 65535) $("sockPort").value = String(p);
+          }
+          if (msg.server && msg.server.host && !$("sockHost").dataset.touched) {
+            $("sockHost").value = msg.server.host;
           }
         }
         if (msg.type === "result" && msg.payload) showResult(msg.payload);
@@ -267,32 +372,77 @@ Copyright (C) 2026 KD Puvvadi
 
     function send(action, extra = {}) {
       ensureBridge();
+      const { host, port } = parseEndpoint();
       const fire = () => {
         if (!ws || ws.readyState !== WebSocket.OPEN) {
           addLog("error", "Bridge not ready");
+          connecting = false;
           return;
         }
-        ws.send(JSON.stringify({ action, host: $("host").value.trim(), port: Number($("port").value) || 9100, ...extra }));
+        ws.send(JSON.stringify({ action, host, port, ...extra }));
       };
       if (ws && ws.readyState === WebSocket.OPEN) fire();
-      else setTimeout(fire, 200);
+      else setTimeout(fire, 250);
     }
 
-    $("host").addEventListener("input", () => { $("host").dataset.touched = "1"; });
-    $("port").addEventListener("input", () => { $("port").dataset.touched = "1"; });
+    async function ensureServerThenConnect() {
+      connecting = true;
+      $("connectBtn").disabled = true;
+      try {
+        const ep = parseEndpoint();
+        const st = await fetch("/api/plc/status").then((r) => r.json());
+        const sock = st.socket || {};
+        if (!sock.running) {
+          addLog("warn", "TCP server off — enabling in settings…");
+          const cur = await fetch("/api/settings").then((r) => r.json());
+          const plc = cur.plc || {};
+          plc.socket = {
+            ...(plc.socket || {}),
+            enabled: true,
+            host: (plc.socket && plc.socket.host) || "0.0.0.0",
+            port: ep.port,
+          };
+          await fetch("/api/settings", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ plc }),
+          });
+          // Give the listener a moment to bind.
+          await new Promise((r) => setTimeout(r, 350));
+          addLog("ok", `TCP Socket enabled on port ${ep.port}`);
+        }
+        send("connect");
+      } catch (err) {
+        connecting = false;
+        $("connectBtn").disabled = false;
+        addLog("error", String(err.message || err));
+        setStatus(String(err.message || err), false);
+      }
+    }
+
+    $("sockHost").addEventListener("input", () => { $("sockHost").dataset.touched = "1"; });
+    $("sockPort").addEventListener("input", () => { $("sockPort").dataset.touched = "1"; });
     $("connectBtn").addEventListener("click", () => {
       if (tcpConnected) send("disconnect");
-      else send("connect");
+      else ensureServerThenConnect();
     });
-    $("triggerBtn").addEventListener("click", () => send("trigger"));
+    $("triggerBtn").addEventListener("click", () => {
+      try { send("trigger"); }
+      catch (err) { addLog("error", String(err.message || err)); }
+    });
     $("clearBtn").addEventListener("click", () => { $("logBox").innerHTML = ""; });
 
     ensureBridge();
+    fetch("/api/settings").then((r) => r.json()).then((settings) => {
+      const sock = (settings.plc || {}).socket || {};
+      const p = Number(sock.port || 9100);
+      if (p >= 1 && p <= 65535) $("sockPort").value = String(p);
+    }).catch(() => {});
     fetch("/api/plc/status").then((r) => r.json()).then((st) => {
       const sock = st.socket || {};
-      if (sock.port) $("port").value = sock.port;
-      addLog("info", `API socket running=${sock.running} ${sock.host || ""}:${sock.port || ""} clients=${sock.clients || 0}`);
-      if (!sock.running) addLog("warn", "Enable TCP Socket in Settings and Save before Connect");
+      const p = Number(sock.port || 0);
+      addLog("info", `API socket running=${!!sock.running} ${(sock.host || "0.0.0.0")}:${p || 9100} clients=${sock.clients || 0}`);
+      if (!sock.running) addLog("warn", "Server is off — Connect will enable TCP Socket automatically");
     }).catch((err) => addLog("error", String(err)));
   </script>
 </body>
