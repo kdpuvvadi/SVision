@@ -896,43 +896,198 @@ class ShapeSearchTool(Tool):
         }, overlay
 
     @staticmethod
+    def _frame_poly(pts: np.ndarray, pad_frac: float = 0.12, pad_px: float = 10.0) -> np.ndarray:
+        """Grow an oriented frame so it sits around the part, not inside it."""
+        pts = np.asarray(pts, dtype=np.float64).reshape(-1, 2)
+        if pts.shape[0] < 3:
+            return pts
+        rect = cv2.minAreaRect(pts.astype(np.float32))
+        (cx, cy), (w, h), ang = rect
+        w = float(w) * (1.0 + pad_frac) + 2.0 * pad_px
+        h = float(h) * (1.0 + pad_frac) + 2.0 * pad_px
+        return cv2.boxPoints(((cx, cy), (max(1.0, w), max(1.0, h)), ang)).astype(np.float64)
+
+    @staticmethod
+    def _expand_poly(pts: np.ndarray, frac: float = 0.12, min_px: float = 6.0) -> np.ndarray:
+        """Push polygon vertices outward from the centroid."""
+        pts = np.asarray(pts, dtype=np.float64).reshape(-1, 2)
+        if pts.shape[0] < 2:
+            return pts
+        center = pts.mean(axis=0)
+        out = np.empty_like(pts)
+        for i, p in enumerate(pts):
+            v = p - center
+            n = float(np.hypot(v[0], v[1])) or 1.0
+            grow = max(min_px, n * frac)
+            out[i] = p + v * (grow / n)
+        return out
+
+    @staticmethod
+    def _live_silhouette(image: np.ndarray, found: dict) -> np.ndarray | None:
+        """Recover the actual part outline under the hit so the overlay frames the live item."""
+        box = np.asarray(found.get("box") or [], dtype=np.float64)
+        if box.shape[0] < 4:
+            return None
+        cx = float(found.get("x") or box[:, 0].mean())
+        cy = float(found.get("y") or box[:, 1].mean())
+        bw = float(found.get("width") or (np.linalg.norm(box[1] - box[0]) + 1.0))
+        bh = float(found.get("height") or (np.linalg.norm(box[2] - box[1]) + 1.0))
+        pad = int(max(24.0, 0.45 * max(bw, bh)))
+        x0 = max(0, int(cx - bw * 0.5 - pad))
+        y0 = max(0, int(cy - bh * 0.5 - pad))
+        x1 = min(image.shape[1], int(cx + bw * 0.5 + pad))
+        y1 = min(image.shape[0], int(cy + bh * 0.5 + pad))
+        if x1 - x0 < 8 or y1 - y0 < 8:
+            return None
+        roi = image[y0:y1, x0:x1]
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if roi.ndim == 3 else roi
+        # Soft threshold against local background — works for dark parts on light decks.
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        thr = float(np.percentile(blur, 70))
+        mask = (blur < max(8.0, thr - 8.0)).astype(np.uint8) * 255
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8), iterations=2)
+        # Dilate so recovered silhouette sits outside the visible edge, not on it.
+        mask = cv2.dilate(mask, np.ones((5, 5), np.uint8), iterations=2)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None
+        lx, ly = cx - x0, cy - y0
+        best = None
+        best_score = -1.0
+        for cnt in contours:
+            area = float(cv2.contourArea(cnt))
+            if area < 0.15 * bw * bh:
+                continue
+            m = cv2.moments(cnt)
+            if m["m00"] <= 1e-6:
+                continue
+            mx, my = m["m10"] / m["m00"], m["m01"] / m["m00"]
+            dist = float(np.hypot(mx - lx, my - ly))
+            score = area / (1.0 + dist)
+            if score > best_score:
+                best_score = score
+                best = cnt
+        if best is None:
+            return None
+        pts = best.reshape(-1, 2).astype(np.float64)
+        pts[:, 0] += x0
+        pts[:, 1] += y0
+        return pts
+
+    @staticmethod
+    def _draw_label(view: np.ndarray, text: str, org: tuple[int, int], color: tuple[int, int, int]) -> None:
+        """TrueType plate rendered at 2× then downscaled — stays sharp in the UI preview."""
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+        except Exception:
+            Image = ImageDraw = ImageFont = None  # type: ignore
+        base = max(22, int(round(min(view.shape[:2]) / 22.0)))
+        pad = max(10, base // 3)
+        border = max(2, base // 9)
+        if Image is not None:
+            font_path = next(
+                (
+                    p
+                    for p in (
+                        r"C:\Windows\Fonts\segoeui.ttf",
+                        r"C:\Windows\Fonts\arial.ttf",
+                        r"C:\Windows\Fonts\calibri.ttf",
+                        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                    )
+                    if __import__("os").path.exists(p)
+                ),
+                None,
+            )
+            up = 2
+            try:
+                font = ImageFont.truetype(font_path, base * up) if font_path else ImageFont.load_default()
+            except Exception:
+                font = ImageFont.load_default()
+            probe = Image.new("RGB", (8, 8), (0, 0, 0))
+            draw = ImageDraw.Draw(probe)
+            bbox = draw.textbbox((0, 0), text, font=font)
+            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            plate_w_up = tw + pad * 2 * up
+            plate_h_up = th + pad * 2 * up
+            plate = Image.new("RGB", (plate_w_up, plate_h_up), (16, 18, 20))
+            draw = ImageDraw.Draw(plate)
+            draw.rectangle(
+                (0, 0, plate_w_up - 1, plate_h_up - 1),
+                outline=(int(color[2]), int(color[1]), int(color[0])),
+                width=border * up,
+            )
+            draw.text(
+                (pad * up - bbox[0], pad * up - bbox[1]),
+                text,
+                font=font,
+                fill=(250, 252, 255),
+            )
+            plate_w = max(1, plate_w_up // up)
+            plate_h = max(1, plate_h_up // up)
+            rgb = cv2.cvtColor(np.asarray(plate), cv2.COLOR_RGB2BGR)
+            rgb = cv2.resize(rgb, (plate_w, plate_h), interpolation=cv2.INTER_AREA)
+            x, y = org
+            x = int(np.clip(x, 2, max(2, view.shape[1] - plate_w - 2)))
+            y = int(np.clip(y - plate_h, 2, max(2, view.shape[0] - plate_h - 2)))
+            if view[y : y + plate_h, x : x + plate_w].shape[:2] == (plate_h, plate_w):
+                view[y : y + plate_h, x : x + plate_w] = rgb
+            return
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = max(1.15, min(view.shape[:2]) / 560.0)
+        thick = max(2, int(round(scale * 2.6)))
+        (tw, th), baseline = cv2.getTextSize(text, font, scale, thick)
+        plate_w, plate_h = tw + pad * 2, th + baseline + pad * 2
+        up = 3
+        plate = np.full((plate_h * up, plate_w * up, 3), 16, dtype=np.uint8)
+        cv2.rectangle(plate, (0, 0), (plate.shape[1] - 1, plate.shape[0] - 1), color, border * up, cv2.LINE_AA)
+        cv2.putText(plate, text, (pad * up, (pad + th) * up), font, scale * up, (250, 252, 255), thick * up, cv2.LINE_AA)
+        plate = cv2.resize(plate, (plate_w, plate_h), interpolation=cv2.INTER_AREA)
+        x, y = org
+        x = int(np.clip(x, 2, max(2, view.shape[1] - plate_w - 2)))
+        y = int(np.clip(y - plate_h, 2, max(2, view.shape[0] - plate_h - 2)))
+        if view[y : y + plate_h, x : x + plate_w].shape[:2] == (plate_h, plate_w):
+            view[y : y + plate_h, x : x + plate_w] = plate
+
+    @staticmethod
     def _draw_hit(image: np.ndarray, found: dict, passed: bool) -> np.ndarray:
         view = image.copy()
         color = (40, 220, 160) if passed else (60, 60, 230)
-        thick = max(2, int(round(min(view.shape[:2]) / 320)))
+        thick = max(2, int(round(min(view.shape[:2]) / 240)))
         box = np.asarray(found.get("box") or [], dtype=np.float64)
-        # Always draw the oriented model box first — stays correct when the piece is rotated.
-        if box.shape[0] >= 4:
-            cv2.polylines(view, [np.int32(np.round(box))], True, color, thick, cv2.LINE_AA)
         rings = found.get("outlines") or [found.get("outline") or []]
-        all_pts = [box] if box.shape[0] >= 4 else []
-        for ring in rings:
-            pts = np.asarray(ring, dtype=np.float64)
-            if pts.shape[0] < 3:
-                continue
-            # Skip shattered debris rings that don't hug the hit box.
-            if box.shape[0] >= 4:
-                bc = box.mean(axis=0)
-                pc = pts.mean(axis=0)
-                if float(np.hypot(pc[0] - bc[0], pc[1] - bc[1])) > 0.75 * max(
-                    float(found.get("width") or 1), float(found.get("height") or 1)
-                ):
-                    continue
-            cv2.polylines(view, [np.int32(np.round(pts))], True, color, max(1, thick - 1), cv2.LINE_AA)
-            all_pts.append(pts)
+        live = ShapeSearchTool._live_silhouette(image, found)
+        frame_src = live if live is not None and live.shape[0] >= 3 else None
+        if frame_src is None:
+            frame_src = box
+            for ring in rings:
+                pts = np.asarray(ring, dtype=np.float64)
+                if pts.shape[0] >= 3:
+                    frame_src = pts
+                    break
+        all_pts: list[np.ndarray] = []
+        if frame_src is not None and frame_src.shape[0] >= 3:
+            # One oriented frame around the live part — no inset inner contour.
+            pad_frac = 0.14 if live is not None else 0.32
+            pad_px = max(16.0, float(thick) * 6.0)
+            frame = ShapeSearchTool._frame_poly(frame_src, pad_frac=pad_frac, pad_px=pad_px)
+            cv2.polylines(view, [np.int32(np.round(frame))], True, color, thick, cv2.LINE_AA)
+            all_pts.append(frame)
         tip = np.asarray(found.get("tip") or [], dtype=np.float64)
         if tip.shape == (2, 2):
-            p0 = (int(round(tip[0, 0])), int(round(tip[0, 1])))
-            p1 = (int(round(tip[1, 0])), int(round(tip[1, 1])))
-            cv2.line(view, p0, p1, color, thick, cv2.LINE_AA)
-            cv2.drawMarker(view, p0, color, cv2.MARKER_CROSS, 12, thick)
-        label = f"{found['confidence'] * 100:.0f}%  {found['angle']:.1f} deg"
+            p0 = tip[0]
+            p1 = tip[1]
+            v = p1 - p0
+            n = float(np.hypot(v[0], v[1])) or 1.0
+            p1 = p0 + v * ((n + max(8.0, thick * 4)) / n)
+            a = (int(round(p0[0])), int(round(p0[1])))
+            b = (int(round(p1[0])), int(round(p1[1])))
+            cv2.line(view, a, b, color, thick, cv2.LINE_AA)
+            cv2.drawMarker(view, a, color, cv2.MARKER_CROSS, max(16, thick * 7), thick)
+        label = f"{found['confidence'] * 100:.0f}%   {found['angle']:.1f} deg"
         stacked = np.vstack(all_pts) if all_pts else np.array([[found["x"], found["y"]]], dtype=np.float64)
-        lx = int(round(float(found["x"]))) + 14
-        ly = int(round(float(np.min(stacked[:, 1])))) - 10
-        ly = max(18, ly)
-        cv2.putText(view, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (20, 20, 20), 3, cv2.LINE_AA)
-        cv2.putText(view, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA)
+        lx = int(round(float(np.max(stacked[:, 0])))) + 10
+        ly = int(round(float(np.min(stacked[:, 1])))) - 8
+        ShapeSearchTool._draw_label(view, label, (lx, ly), color)
         return view
 
     @staticmethod

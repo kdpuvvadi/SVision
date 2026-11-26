@@ -33,7 +33,7 @@ _tool_pool = ThreadPoolExecutor(max_workers=max(3, THREAD_COUNT), thread_name_pr
 _batch_pool = ThreadPoolExecutor(max_workers=THREAD_COUNT, thread_name_prefix="svision-batch")
 
 
-def _fit_preview(image: np.ndarray, limit: int = 720) -> np.ndarray:
+def _fit_preview(image: np.ndarray, limit: int = 1080) -> np.ndarray:
     height, width = image.shape[:2]
     long_edge = max(height, width)
     if long_edge <= limit:
@@ -179,7 +179,7 @@ def _tool_preview(image: np.ndarray | None, result: dict, mark: bool, roi: dict 
     if mark:
         view = _mark_pose(view, result, src_w, src_h)
     view = _draw_region(view, roi, src_w, src_h)
-    return encode_jpeg(view, 70)
+    return encode_jpeg(view, 95)
 
 
 def _is_input_tool(spec: dict) -> bool:
@@ -315,7 +315,7 @@ def inspect_array(project_id: str, image: np.ndarray, filename: str = "image") -
         "width": int(image.shape[1]),
         "height": int(image.shape[0]),
         "tools": tools,
-        "preview_jpeg": encode_jpeg(preview, 82),
+        "preview_jpeg": encode_jpeg(preview, 92),
     }
 
 
