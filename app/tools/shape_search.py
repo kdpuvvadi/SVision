@@ -22,7 +22,7 @@ import time
 import cv2
 import numpy as np
 
-from app.core.accel import resolve_accel, use_opencl
+from app.core.accel import resolve_accel
 from app.core.features import _roi_box
 from app.tools.base import Tool
 from app.tools.registry import register
@@ -263,9 +263,11 @@ def _match_features(search: np.ndarray, model: np.ndarray) -> dict | None:
     box = _oriented_box_points(all_pts)
     if box.shape[0] < 4:
         box = _transform_corners(aff, float(mw), float(mh))
-    conf = float(inliers) / float(len(good))
-    # Blend with match density so sparse luck doesn't look like a solid hit.
-    conf = min(1.0, conf * min(1.0, inliers / 40.0) * 0.35 + conf * 0.65)
+    # Confidence: inlier ratio is the quality signal. Small models rarely produce
+    # 40 keypoints, so require a modest consensus (~12 inliers) instead of punishing them.
+    inlier_ratio = float(inliers) / float(len(good))
+    support = min(1.0, float(inliers) / 12.0)
+    conf = float(np.clip(inlier_ratio * (0.55 + 0.45 * support), 0.0, 1.0))
     # Orientation tick from the top-most content point, outward.
     main_src = max(outline_srcs, key=lambda pts: float(cv2.contourArea(pts.astype(np.float32))))
     top_local = main_src[int(np.argmin(main_src[:, 1]))]
@@ -329,8 +331,15 @@ def _match_template_pyramid(
             if score_e > score and abs(px_e - px) <= 2 and abs(py_e - py) <= 2:
                 score = float(score_e)
                 px, py = px_e, py_e
-            if best is not None and score <= best["confidence"]:
-                continue
+            if best is not None:
+                # OpenCL matchTemplate often spikes a near-perfect score at ±step on
+                # an untilted part. Demand a real gain before accepting more rotation.
+                gain = score - float(best["confidence"])
+                more_rotated = abs(angle) > abs(float(best["angle"])) + 1e-6
+                if more_rotated and gain < 0.02:
+                    continue
+                if gain <= 0:
+                    continue
             # Contours in the pre-rotation scaled model, then through the same warp used for matching.
             outline_locals = _model_outlines(scaled)
             outlines = []
@@ -374,6 +383,38 @@ def _match_template_pyramid(
                 "method": "template",
             }
     return best
+
+
+def _poses_agree(a: dict, b: dict, model_shape: tuple[int, int]) -> bool:
+    """True when two hits likely refer to the same part (centers within ~half model)."""
+    mh, mw = float(model_shape[0]), float(model_shape[1])
+    tol = 0.55 * max(mw, mh, 16.0)
+    return float(np.hypot(float(a["x"]) - float(b["x"]), float(a["y"]) - float(b["y"]))) <= tol
+
+
+def _pick_best_match(
+    sift: dict | None,
+    templ: dict | None,
+    model_shape: tuple[int, int],
+) -> dict | None:
+    """Choose pose + confidence from SIFT and template.
+
+    SIFT owns rotated/scaled pose. Template often scores the registered piece far
+    higher on low-texture models — use that score when both agree on location.
+    """
+    if sift is None:
+        return templ
+    if templ is None:
+        return sift
+    if _poses_agree(sift, templ, model_shape):
+        # Same hit: keep SIFT pose (handles rotation/scale), take the stronger score.
+        out = dict(sift)
+        out["confidence"] = max(float(sift["confidence"]), float(templ["confidence"]))
+        if float(templ["confidence"]) > float(sift["confidence"]):
+            out["method"] = "sift+template"
+        return out
+    # Different places — take the stronger hit.
+    return sift if sift["confidence"] >= templ["confidence"] else templ
 
 
 class ShapeSearchTool(Tool):
@@ -454,7 +495,6 @@ class ShapeSearchTool(Tool):
         name = tool.get("name") or self.title
         min_confidence = float(cfg.get("min_confidence", 0.55))
         accel = resolve_accel(cfg.get("accel_device") or "cpu")
-        opencl = use_opencl(cfg.get("accel_device"))
         model = self._load_model(project_id, tool.get("id", ""))
         if model is None:
             return {
@@ -480,11 +520,10 @@ class ShapeSearchTool(Tool):
         angles = _angle_list(span, step)
 
         best = _match_features(search, model_gray)
-        # Prefer template only when features are weak / unavailable.
-        if best is None or best["confidence"] < 0.45:
-            templ = _match_template_pyramid(search, model_gray, angles, opencl)
-            if templ is not None and (best is None or templ["confidence"] > best["confidence"]):
-                best = templ
+        # OpenCL matchTemplate invents near-perfect scores at the wrong scale/angle
+        # on this stack (e.g. 1.0 @ 10° while CPU has 0.98 @ 0°). Keep template on CPU.
+        templ = _match_template_pyramid(search, model_gray, angles, False)
+        best = _pick_best_match(best, templ, model_gray.shape)
 
         elapsed = (time.perf_counter() - started) * 1000.0
         if best is None or best["confidence"] <= 0:
