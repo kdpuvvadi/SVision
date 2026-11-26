@@ -238,6 +238,26 @@ def _input_tool(project: dict) -> dict | None:
     return None
 
 
+def pipeline_image_until(project_id: str, image: np.ndarray, stop_tool_id: str) -> np.ndarray:
+    """Run flow tools before ``stop_tool_id`` and return the working image at that point."""
+    project = store.get_project(project_id)
+    working = image
+    ctx: dict = {"pose": None, "image": image}
+    for tool in (project.get("flow") or {}).get("tools", []):
+        if tool.get("id") == stop_tool_id:
+            break
+        try:
+            module = get_tool(tool.get("type", ""))
+        except KeyError:
+            continue
+        result, _heat = module.run(working, tool, project_id, ctx)
+        if result.get("pose"):
+            ctx["pose"] = result["pose"]
+        if module.transforms_image and ctx.get("image") is not None:
+            working = ctx["image"]
+    return working
+
+
 def inspect_array(project_id: str, image: np.ndarray, filename: str = "image") -> dict:
     started = time.perf_counter()
     project = store.get_project(project_id)
@@ -258,33 +278,23 @@ def inspect_array(project_id: str, image: np.ndarray, filename: str = "image") -
     ctx: dict = {"pose": None, "image": image}
     tools: list[dict] = []
     overlay = None
-    index = 0
-    while index < len(active):
-        group = []
-        while index < len(active) and not get_tool(active[index]["type"]).transforms_image:
-            group.append(active[index])
-            index += 1
+    # Sequential handoff: each tool sees the image produced by earlier tools.
+    for spec in active:
         seen = working
-        if group:
-            futures = [_tool_pool.submit(_run_one, project_id, seen, tool, ctx) for tool in group]
-            for spec, future in zip(group, futures):
-                result, heat = future.result()
-                if result.get("pose"):
-                    ctx["pose"] = result["pose"]
-                _attach_preview(result, _step_image(spec, image, seen, heat), heat is None and not _is_input_tool(spec), spec)
-                tools.append(result)
-                if heat is not None:
-                    overlay = heat
-        if index < len(active):
-            spec = active[index]
-            index += 1
-            result, heat = _run_one(project_id, seen, spec, ctx)
-            _attach_preview(result, _step_image(spec, image, seen, heat), heat is None and not _is_input_tool(spec), spec)
-            tools.append(result)
-            if ctx.get("image") is not None:
-                working = ctx["image"]
-            if heat is not None:
-                overlay = heat
+        result, heat = _run_one(project_id, seen, spec, ctx)
+        if result.get("pose"):
+            ctx["pose"] = result["pose"]
+        _attach_preview(
+            result,
+            _step_image(spec, image, seen, heat),
+            heat is None and not _is_input_tool(spec),
+            spec,
+        )
+        tools.append(result)
+        if get_tool(spec["type"]).transforms_image and ctx.get("image") is not None:
+            working = ctx["image"]
+        if heat is not None:
+            overlay = heat
 
     if not tools:
         overall = "NG"

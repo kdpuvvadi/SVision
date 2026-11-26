@@ -309,6 +309,65 @@ def get_current_image_file(project_id: str, index: int) -> FileResponse:
     return FileResponse(path)
 
 
+@app.post("/api/projects/{project_id}/tools/{tool_id}/pipeline-image")
+async def pipeline_image(project_id: str, tool_id: str, fresh: int = 1) -> Response:
+    """Grab/load a frame, run every tool before ``tool_id``, return that working image."""
+    try:
+        project = store.get_project(project_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    tool_ids = {t.get("id") for t in (project.get("flow") or {}).get("tools", [])}
+    if tool_id not in tool_ids:
+        raise HTTPException(404, "Tool not in this scene.")
+
+    from app.core.camera import camera_config_from_project
+    from app.core.classifier import encode_jpeg
+    from app.core.engine import decode_image, pipeline_image_until
+
+    source, _cfg = camera_config_from_project(project)
+    frame = None
+    if source in {"usb", "gige", "gentl"}:
+        try:
+            cam = camera_from_project(project)
+            backend = getattr(cam, "_backend", None)
+            if fresh and backend is not None and hasattr(backend, "grab_fresh"):
+                frame = backend.grab_fresh()
+            else:
+                frame = cam.grab()
+        except Exception as exc:
+            raise HTTPException(400, str(exc)) from exc
+        try:
+            current_images.save(project_id, [("live-camera.jpg", encode_jpeg(frame, 90))])
+        except Exception:
+            pass
+    else:
+        stored = current_images.read(project_id)
+        if not stored:
+            raise HTTPException(400, "No image yet. Choose a file or set Camera to live.")
+        name, raw = stored[0]
+        try:
+            frame = decode_image(raw)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    try:
+        working = pipeline_image_until(project_id, frame, tool_id)
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+    jpeg = encode_jpeg(working, 90)
+    height, width = working.shape[:2]
+    return Response(
+        content=jpeg,
+        media_type="image/jpeg",
+        headers={
+            "X-Image-Width": str(width),
+            "X-Image-Height": str(height),
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+        },
+    )
+
+
 @app.post("/api/projects/{project_id}/current-image")
 async def put_current_image(project_id: str, files: list[UploadFile] = File(...)) -> dict:
     try:

@@ -36,32 +36,34 @@ def _crop(image: np.ndarray, x0: int, y0: int, x1: int, y1: int) -> np.ndarray:
     return image[y0:y1, x0:x1].copy()
 
 
+def _annotate_region(image: np.ndarray, x0: int, y0: int, x1: int, y1: int) -> np.ndarray:
+    view = image.copy()
+    color = (40, 220, 160)
+    thick = max(2, int(round(min(view.shape[:2]) / 280)))
+    cv2.rectangle(view, (x0, y0), (x1, y1), color, thick)
+    return view
+
+
 class PositionCompensationTool(Tool):
     type = "position_compensation"
     title = "Position Compensation"
     ui_modules = ["/static/tools/position_compensation.js"]
-    summary = "Crop the image to the selected region so later tools see fewer pixels."
+    summary = "Crop the image to a region and hand the cropped frame to every tool after this one."
     transforms_image = True
 
     def fields(self) -> list[dict]:
         return [
             {"key": "roi", "label": "Crop region", "kind": "roi"},
-            {
-                "key": "align",
-                "label": "Align to Shape Search",
-                "kind": "select",
-                "options": [
-                    {"value": "yes", "label": "Yes, follow found position"},
-                    {"value": "no", "label": "No, crop the fixed region"},
-                ],
-            },
         ]
 
     def default_config(self) -> dict:
-        return {"roi": None, "align": "yes"}
+        return {"roi": None}
 
     def status(self) -> str:
-        return "Optional. Place after Shape Search if the crop should follow the part. Tools after this one run on the cropped image."
+        return (
+            "Draw the crop region. Later tools receive this crop. "
+            "If a prior tool published a pose, the crop follows that pose automatically."
+        )
 
     def run(self, image: np.ndarray, tool: dict, project_id: str, ctx: dict | None = None) -> tuple[dict, np.ndarray | None]:
         started = time.perf_counter()
@@ -78,12 +80,15 @@ class PositionCompensationTool(Tool):
                 "elapsed_ms": (time.perf_counter() - started) * 1000.0,
             }, None
 
-        pose = (ctx or {}).get("pose") if (cfg.get("align") or "yes") == "yes" else None
+        # Follow pose from any prior tool automatically (no Shape Search toggle).
+        pose = (ctx or {}).get("pose")
         before = int(image.shape[0] * image.shape[1])
         angle = 0.0
         dx = 0.0
         dy = 0.0
 
+        x0, y0, x1, y1 = _roi_box(image, roi)
+        ih, iw = image.shape[:2]
         if pose:
             angle = float(pose.get("angle") or 0.0)
             cx = float(pose["x"])
@@ -98,33 +103,37 @@ class PositionCompensationTool(Tool):
                     flags=cv2.INTER_LINEAR,
                     borderMode=cv2.BORDER_REPLICATE,
                 )
-            _, _, x1, y1 = _roi_box(image, roi)
-            x0, y0, _, _ = _roi_box(image, roi)
             rw = max(1, x1 - x0)
             rh = max(1, y1 - y0)
             dx = cx - ((x0 + x1) / 2.0)
             dy = cy - ((y0 + y1) / 2.0)
             nx0 = int(round(cx - rw / 2.0))
             ny0 = int(round(cy - rh / 2.0))
-            cropped = _crop(rotated, nx0, ny0, nx0 + rw, ny0 + rh)
+            nx1 = nx0 + rw
+            ny1 = ny0 + rh
+            cropped = _crop(rotated, nx0, ny0, nx1, ny1)
+            preview = _annotate_region(rotated, nx0, ny0, nx1, ny1)
+            region = {
+                "x": nx0 / max(iw, 1),
+                "y": ny0 / max(ih, 1),
+                "w": rw / max(iw, 1),
+                "h": rh / max(ih, 1),
+            }
         else:
-            x0, y0, x1, y1 = _roi_box(image, roi)
             cropped = _crop(image, x0, y0, x1, y1)
+            preview = _annotate_region(image, x0, y0, x1, y1)
+            region = {
+                "x": x0 / max(iw, 1),
+                "y": y0 / max(ih, 1),
+                "w": (x1 - x0) / max(iw, 1),
+                "h": (y1 - y0) / max(ih, 1),
+            }
 
         after = int(cropped.shape[0] * cropped.shape[1])
         if ctx is not None:
             ctx["image"] = cropped
-        preview = cropped
-        long_edge = max(cropped.shape[:2])
-        if long_edge > 640:
-            scale = 640.0 / long_edge
-            preview = cv2.resize(
-                cropped,
-                (max(1, int(cropped.shape[1] * scale)), max(1, int(cropped.shape[0] * scale))),
-                interpolation=cv2.INTER_LINEAR,
-            )
         elapsed = (time.perf_counter() - started) * 1000.0
-        followed = "followed Shape Search" if pose else "fixed region"
+        followed = "followed prior pose" if pose else "fixed region"
         return {
             "id": tool.get("id"),
             "type": self.type,
@@ -137,6 +146,7 @@ class PositionCompensationTool(Tool):
             "angle": round(angle, 1),
             "offset_x": round(dx, 1),
             "offset_y": round(dy, 1),
+            "region": region,
             "message": f"Crop {cropped.shape[1]}×{cropped.shape[0]}  {after}/{before} px  {followed}",
             "elapsed_ms": elapsed,
         }, preview

@@ -118,25 +118,11 @@ async function grabLiveCamera() {
   return blob;
 }
 
-async function grabShapeModelFromCamera() {
-  const status = $("grabModelStatus");
-  if (status) status.textContent = "Grabbing from camera…";
-  try {
-    const blob = await grabLiveCamera();
-    const file = new File([blob], "live-camera.jpg", { type: "image/jpeg" });
-    state.modelFile = file;
-    state.modelRoi = null;
-    if (state.modelUrl) URL.revokeObjectURL(state.modelUrl);
-    state.modelUrl = URL.createObjectURL(file);
-    drawModelCanvas();
-    if (typeof drawRoiCanvas === "function") drawRoiCanvas();
-    if (status) {
-      status.textContent = `Grabbed ${new Date().toLocaleTimeString()}. Draw the pattern, then Register.`;
-    }
-  } catch (err) {
-    if (status) status.textContent = err.message || String(err);
-    throw err;
+async function updateShapeModelImage() {
+  if (window.SVisionShapeModel?.update) {
+    return window.SVisionShapeModel.update();
   }
+  throw new Error("Model editor is not loaded.");
 }
 
 function flowPayload() {
@@ -438,6 +424,8 @@ function toolRegion(tool) {
 }
 
 function toolOutputHtml(tool) {
+  // Shape Search uses the model popup — no duplicate top preview in settings.
+  if (tool?.type === "shape_search") return "";
   const result = measuredTool(tool.id);
   if (!result) return `<p class="hint">Measure to see this tool's output.</p>`;
   const image = toolImage(result);
@@ -980,16 +968,12 @@ function bind() {
       await saveFlow();
       return;
     }
-    if (e.target.id === "grabModelCamera") {
+    if (e.target.id === "openModelEditor") {
       try {
-        await grabShapeModelFromCamera();
+        if (window.SVisionShapeModel?.open) await window.SVisionShapeModel.open();
       } catch (err) {
         alert(err.message);
       }
-      return;
-    }
-    if (e.target.id === "registerModel") {
-      await registerShapeModel();
       return;
     }
     if (e.target.id === "deleteModel") {
@@ -1258,16 +1242,12 @@ function bind() {
       await saveFlow();
       return;
     }
-    if (e.target.id === "grabModelCamera") {
+    if (e.target.id === "openModelEditor") {
       try {
-        await grabShapeModelFromCamera();
+        if (window.SVisionShapeModel?.open) await window.SVisionShapeModel.open();
       } catch (err) {
         alert(err.message);
       }
-      return;
-    }
-    if (e.target.id === "registerModel") {
-      await registerShapeModel();
       return;
     }
     if (e.target.id === "deleteModel") {
@@ -1607,6 +1587,11 @@ function drawPreviewRegion(tool) {
   const canvas = $("regionOverlay");
   const img = $("preview");
   if (!canvas || !img) return;
+  // Position Compensation preview JPEG already draws the crop box — avoid a second overlay.
+  if (tool?.type === "position_compensation") {
+    canvas.hidden = true;
+    return;
+  }
   // Measure already burns the pose outline into the JPEG — don't stack the search ROI on top.
   if (resultHasPoseOverlay(measuredTool(tool?.id)) || img.hidden) {
     canvas.hidden = true;
@@ -1652,6 +1637,38 @@ function resetZoom() {
   state.zoom.x = 0;
   state.zoom.y = 0;
   state.zoom.drag = null;
+  applyZoom();
+}
+
+/** Fit the inspection preview around a normalized ROI with padding (slightly zoomed out). */
+function fitZoomToRegion(roi, pad = 0.4) {
+  const zone = $("dropZone");
+  const img = $("preview");
+  if (!zone || !img || !roi || img.hidden) {
+    resetZoom();
+    return;
+  }
+  const zw = zone.clientWidth || 1;
+  const zh = zone.clientHeight || 1;
+  const iw = img.naturalWidth || img.width || 1;
+  const ih = img.naturalHeight || img.height || 1;
+  const fit = contentFit(zw, zh, iw, ih);
+  if (!fit) {
+    resetZoom();
+    return;
+  }
+  const rx = Number(roi.x) || 0;
+  const ry = Number(roi.y) || 0;
+  const rw = Math.max(0.02, Number(roi.w) || 0.02);
+  const rh = Math.max(0.02, Number(roi.h) || 0.02);
+  const vw = Math.min(1, rw * (1 + pad * 2));
+  const vh = Math.min(1, rh * (1 + pad * 2));
+  const scale = Math.min(6, Math.max(1.2, Math.min(1 / vw, 1 / vh) * 0.9));
+  const regionCx = fit.x + (rx + rw / 2) * fit.w - zw / 2;
+  const regionCy = fit.y + (ry + rh / 2) * fit.h - zh / 2;
+  state.zoom.scale = scale;
+  state.zoom.x = -regionCx * scale;
+  state.zoom.y = -regionCy * scale;
   applyZoom();
 }
 
@@ -1711,8 +1728,19 @@ function showToolOutput(id, options = {}) {
       $("emptyState").hidden = true;
       $("preview").hidden = false;
       $("preview").src = image;
-      resetZoom();
-      $("preview").onload = () => drawPreviewRegion(flowTool);
+      const roi = result?.region || toolRegion(flowTool) || null;
+      const zoomRegion = flowTool?.type === "position_compensation" && roi;
+      $("preview").onload = () => {
+        if (zoomRegion) fitZoomToRegion(roi, 0.4);
+        else resetZoom();
+        drawPreviewRegion(flowTool);
+      };
+      if ($("preview").complete) {
+        if (zoomRegion) fitZoomToRegion(roi, 0.4);
+        else resetZoom();
+      } else {
+        resetZoom();
+      }
     }
     if (result) {
       const cls = (result.judgment || "idle").toLowerCase();
