@@ -23,6 +23,7 @@ const state = {
   lastResults: [],
   pendingFiles: [],
   sourceUrl: "",
+  roiUrl: "",
   selectedId: null,
   settingTab: "name",
   layout: "inspect",
@@ -123,6 +124,33 @@ async function updateShapeModelImage() {
     return window.SVisionShapeModel.update();
   }
   throw new Error("Model editor is not loaded.");
+}
+
+async function updateRoiImage() {
+  const tool = selectedTool();
+  const status = $("roiUpdateStatus");
+  if (!tool || !state.project?.id) throw new Error("Select a tool first.");
+  if (status) status.textContent = "Updating from previous tools…";
+  const res = await fetch(
+    `/api/projects/${state.project.id}/tools/${tool.id}/pipeline-image?fresh=1`,
+    { method: "POST" }
+  );
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    const detail = data.detail;
+    const msg = typeof detail === "string" ? detail : res.statusText || "Update failed.";
+    if (status) status.textContent = msg;
+    throw new Error(msg);
+  }
+  const blob = await res.blob();
+  if (state.roiUrl) URL.revokeObjectURL(state.roiUrl);
+  state.roiUrl = URL.createObjectURL(blob);
+  const w = res.headers.get("X-Image-Width");
+  const h = res.headers.get("X-Image-Height");
+  if (status) {
+    status.textContent = `Updated ${new Date().toLocaleTimeString()}${w && h ? ` · ${w}×${h}` : ""} · draw the region on this image.`;
+  }
+  drawRoiCanvas();
 }
 
 function flowPayload() {
@@ -483,9 +511,11 @@ function fieldHtml(tool, field) {
   if (field.kind === "roi") {
     return `<div class="roi-row">
       <span>${escapeHtml(field.label)}</span>
+      <button id="updateRoiImage" type="button" class="primary">Update</button>
       <button id="clearRoi" type="button" data-roi-key="${field.key}">Clear</button>
       <span id="roiLabel">${roiText(value)}</span>
     </div>
+    <p id="roiUpdateStatus" class="hint">Update pulls Camera → prior tools, then shows that image for drawing the region.</p>
     <div class="roi-stage"><canvas id="roiCanvas" data-roi-key="${field.key}" width="640" height="280"></canvas></div>`;
   }
   return "";
@@ -961,6 +991,14 @@ function bind() {
       }
       return;
     }
+    if (e.target.id === "updateRoiImage") {
+      try {
+        await updateRoiImage();
+      } catch (err) {
+        alert(err.message);
+      }
+      return;
+    }
     if (e.target.id === "clearRoi") {
       const tool = selectedTool();
       const key = e.target.dataset.roiKey || "roi";
@@ -1232,6 +1270,14 @@ function bind() {
         await saveFlow();
         renderOptions();
         updateImageInput();
+      }
+      return;
+    }
+    if (e.target.id === "updateRoiImage") {
+      try {
+        await updateRoiImage();
+      } catch (err) {
+        alert(err.message);
       }
       return;
     }
@@ -2151,7 +2197,7 @@ function drawRoiCanvas() {
   if (!canvas) return;
   const ctx = canvas.getContext("2d");
   const img = new Image();
-  const source = $("preview").src;
+  const source = state.roiUrl || $("preview")?.src || "";
   const tool = selectedTool();
   const paint = () => {
     ctx.fillStyle = "#0a0c0e";
@@ -2166,6 +2212,9 @@ function drawRoiCanvas() {
       ctx.drawImage(img, x, y, w, h);
     } else {
       canvas._fit = { x: 0, y: 0, w: canvas.width, h: canvas.height };
+      ctx.fillStyle = "#9aa6b2";
+      ctx.font = "13px Segoe UI, sans-serif";
+      ctx.fillText("Click Update to load the image from prior tools", 16, 28);
     }
     const roi = state.drawing
       ? {
@@ -2184,6 +2233,7 @@ function drawRoiCanvas() {
   };
   if (source) {
     img.onload = paint;
+    img.onerror = paint;
     img.src = source;
   } else {
     paint();
