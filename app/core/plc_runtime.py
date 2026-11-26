@@ -22,7 +22,9 @@ from typing import Any
 from app.core.handshake import handshake
 from app.core.measure_service import measure_service
 from app.core.modbus_server import modbus_adapter
+from app.core.mqtt_broker import mqtt_bridge
 from app.core.opcua_server import opcua_adapter
+from app.core.socket_server import result_socket
 from app.storage.store import default_plc_settings, load_settings
 
 
@@ -38,13 +40,18 @@ class PlcRuntime:
     def stop(self) -> None:
         modbus_adapter.stop()
         opcua_adapter.stop()
+        result_socket.stop()
+        mqtt_bridge.stop()
         measure_service.stop()
         self._started = False
 
     def apply_settings(self, plc: dict[str, Any] | None) -> dict[str, Any]:
-        cfg = {**default_plc_settings(), **(plc or {})}
-        modbus = {**default_plc_settings()["modbus"], **(cfg.get("modbus") or {})}
-        opcua = {**default_plc_settings()["opcua"], **(cfg.get("opcua") or {})}
+        defaults = default_plc_settings()
+        cfg = {**defaults, **(plc or {})}
+        modbus = {**defaults["modbus"], **(cfg.get("modbus") or {})}
+        opcua = {**defaults["opcua"], **(cfg.get("opcua") or {})}
+        sock = {**defaults["socket"], **(cfg.get("socket") or {})}
+        mqtt = {**defaults["mqtt"], **(cfg.get("mqtt") or {})}
         handshake.configure(
             done_pulse_ms=int(cfg.get("done_pulse_ms") or 80),
             production_project_id=str(cfg.get("production_project_id") or ""),
@@ -61,6 +68,21 @@ class PlcRuntime:
             opcua_adapter.start(endpoint=str(opcua.get("endpoint") or "opc.tcp://0.0.0.0:4840/svision/"))
         else:
             opcua_adapter.stop()
+        if sock.get("enabled"):
+            result_socket.start(
+                host=str(sock.get("host") or "0.0.0.0"),
+                port=int(sock.get("port") or 9100),
+            )
+        else:
+            result_socket.stop()
+        if mqtt.get("enabled"):
+            mqtt_bridge.start(
+                host=str(mqtt.get("host") or "0.0.0.0"),
+                port=int(mqtt.get("port") or 1883),
+                topic=str(mqtt.get("topic") or "svision/results"),
+            )
+        else:
+            mqtt_bridge.stop()
         return self.status()
 
     def status(self) -> dict[str, Any]:
@@ -68,8 +90,19 @@ class PlcRuntime:
             "handshake": handshake.as_dict(),
             "modbus": modbus_adapter.status(),
             "opcua": opcua_adapter.status(),
+            "socket": result_socket.status(),
+            "mqtt": mqtt_bridge.status(),
             "measure_running": True,
         }
+
+    def publish_result(self, project_id: str, result: dict[str, Any] | None, error: str | None = None) -> None:
+        from app.core.result_payload import build_result_payload
+
+        payload = build_result_payload(project_id, result, error=error)
+        if result_socket.status().get("running"):
+            result_socket.publish(payload)
+        if mqtt_bridge.status().get("running"):
+            mqtt_bridge.publish(payload)
 
 
 plc_runtime = PlcRuntime()

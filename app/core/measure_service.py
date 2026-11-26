@@ -124,6 +124,12 @@ class MeasureService:
             else:
                 handshake.finish_ng(elapsed, result, result.get("message") or "NG")
             try:
+                from app.core.plc_runtime import plc_runtime
+
+                plc_runtime.publish_result(job.project_id, result)
+            except Exception:
+                pass
+            try:
                 from app.tools.registry import notify_measure_done
 
                 notify_measure_done(job.project_id, result)
@@ -137,6 +143,12 @@ class MeasureService:
             elapsed = (time.perf_counter() - started) * 1000.0
             job.error = str(exc)
             handshake.finish_error(str(exc), elapsed)
+            try:
+                from app.core.plc_runtime import plc_runtime
+
+                plc_runtime.publish_result(job.project_id, None, error=str(exc))
+            except Exception:
+                pass
             log(f"[Measure] ERROR after {elapsed:.1f} ms: {exc}")
         finally:
             job.done_event.set()

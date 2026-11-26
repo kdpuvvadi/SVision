@@ -92,7 +92,61 @@ def default_plc_settings() -> dict:
             "enabled": False,
             "endpoint": "opc.tcp://0.0.0.0:4840/svision/",
         },
+        "socket": {
+            "enabled": False,
+            "host": "0.0.0.0",
+            "port": 9100,
+        },
+        "mqtt": {
+            "enabled": False,
+            "host": "0.0.0.0",
+            "port": 1883,
+            "topic": "svision/results",
+        },
     }
+
+
+def _merge_plc_settings(plc: dict | None) -> dict:
+    merged = default_plc_settings()
+    plc = plc if isinstance(plc, dict) else {}
+    merged["production_project_id"] = str(plc.get("production_project_id") or "")
+    try:
+        merged["done_pulse_ms"] = max(10, int(plc.get("done_pulse_ms") or 80))
+    except (TypeError, ValueError):
+        merged["done_pulse_ms"] = 80
+    for key, fields in (
+        ("modbus", ("enabled", "host", "port", "unit_id")),
+        ("opcua", ("enabled", "endpoint")),
+        ("socket", ("enabled", "host", "port")),
+        ("mqtt", ("enabled", "host", "port", "topic")),
+    ):
+        raw = plc.get(key) if isinstance(plc.get(key), dict) else {}
+        for field in fields:
+            if field in raw:
+                merged[key][field] = raw[field]
+        merged[key]["enabled"] = bool(merged[key].get("enabled"))
+    try:
+        merged["modbus"]["port"] = int(merged["modbus"].get("port") or 1502)
+    except (TypeError, ValueError):
+        merged["modbus"]["port"] = 1502
+    try:
+        merged["modbus"]["unit_id"] = int(merged["modbus"].get("unit_id") or 1)
+    except (TypeError, ValueError):
+        merged["modbus"]["unit_id"] = 1
+    try:
+        merged["socket"]["port"] = int(merged["socket"].get("port") or 9100)
+    except (TypeError, ValueError):
+        merged["socket"]["port"] = 9100
+    try:
+        merged["mqtt"]["port"] = int(merged["mqtt"].get("port") or 1883)
+    except (TypeError, ValueError):
+        merged["mqtt"]["port"] = 1883
+    merged["mqtt"]["topic"] = str(merged["mqtt"].get("topic") or "svision/results").strip() or "svision/results"
+    merged["socket"]["host"] = str(merged["socket"].get("host") or "0.0.0.0")
+    merged["mqtt"]["host"] = str(merged["mqtt"].get("host") or "0.0.0.0")
+    merged["modbus"]["host"] = str(merged["modbus"].get("host") or "0.0.0.0")
+    merged["opcua"]["endpoint"] = str(merged["opcua"].get("endpoint") or "opc.tcp://0.0.0.0:4840/svision/")
+    return merged
 
 
 def default_settings() -> dict:
@@ -112,27 +166,7 @@ def load_settings() -> dict:
             settings["layout"] = layout
         settings["flow_open"] = bool(raw.get("flow_open")) and settings["layout"] == "edit"
         plc = raw.get("plc") if isinstance(raw.get("plc"), dict) else {}
-        merged = default_plc_settings()
-        merged["production_project_id"] = str(plc.get("production_project_id") or "")
-        try:
-            merged["done_pulse_ms"] = max(10, int(plc.get("done_pulse_ms") or 80))
-        except (TypeError, ValueError):
-            merged["done_pulse_ms"] = 80
-        modbus = plc.get("modbus") if isinstance(plc.get("modbus"), dict) else {}
-        opcua = plc.get("opcua") if isinstance(plc.get("opcua"), dict) else {}
-        merged["modbus"].update({k: modbus[k] for k in merged["modbus"] if k in modbus})
-        merged["opcua"].update({k: opcua[k] for k in merged["opcua"] if k in opcua})
-        merged["modbus"]["enabled"] = bool(merged["modbus"].get("enabled"))
-        merged["opcua"]["enabled"] = bool(merged["opcua"].get("enabled"))
-        try:
-            merged["modbus"]["port"] = int(merged["modbus"].get("port") or 1502)
-        except (TypeError, ValueError):
-            merged["modbus"]["port"] = 1502
-        try:
-            merged["modbus"]["unit_id"] = int(merged["modbus"].get("unit_id") or 1)
-        except (TypeError, ValueError):
-            merged["modbus"]["unit_id"] = 1
-        settings["plc"] = merged
+        settings["plc"] = _merge_plc_settings(plc)
     return settings
 
 
@@ -147,26 +181,7 @@ def save_settings(
     if flow_open is not None:
         current["flow_open"] = bool(flow_open) and current["layout"] == "edit"
     if plc is not None:
-        merged = default_plc_settings()
-        merged["production_project_id"] = str(plc.get("production_project_id") or "")
-        try:
-            merged["done_pulse_ms"] = max(10, int(plc.get("done_pulse_ms") or 80))
-        except (TypeError, ValueError):
-            merged["done_pulse_ms"] = 80
-        modbus = plc.get("modbus") if isinstance(plc.get("modbus"), dict) else {}
-        opcua = plc.get("opcua") if isinstance(plc.get("opcua"), dict) else {}
-        merged["modbus"].update({k: modbus[k] for k in ("enabled", "host", "port", "unit_id") if k in modbus})
-        merged["opcua"].update({k: opcua[k] for k in ("enabled", "endpoint") if k in opcua})
-        merged["modbus"]["enabled"] = bool(merged["modbus"].get("enabled"))
-        merged["opcua"]["enabled"] = bool(merged["opcua"].get("enabled"))
-        try:
-            merged["modbus"]["port"] = int(merged["modbus"].get("port") or 1502)
-        except (TypeError, ValueError):
-            merged["modbus"]["port"] = 1502
-        try:
-            merged["modbus"]["unit_id"] = int(merged["modbus"].get("unit_id") or 1)
-        except (TypeError, ValueError):
-            merged["modbus"]["unit_id"] = 1
+        merged = _merge_plc_settings(plc)
         merged["modbus"]["host"] = str(merged["modbus"].get("host") or "0.0.0.0")
         merged["opcua"]["endpoint"] = str(merged["opcua"].get("endpoint") or "opc.tcp://0.0.0.0:4840/svision/")
         current["plc"] = merged

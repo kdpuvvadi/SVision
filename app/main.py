@@ -89,11 +89,26 @@ class PlcOpcuaSettings(BaseModel):
     endpoint: str = "opc.tcp://0.0.0.0:4840/svision/"
 
 
+class PlcSocketSettings(BaseModel):
+    enabled: bool = False
+    host: str = "0.0.0.0"
+    port: int = 9100
+
+
+class PlcMqttSettings(BaseModel):
+    enabled: bool = False
+    host: str = "0.0.0.0"
+    port: int = 1883
+    topic: str = "svision/results"
+
+
 class PlcSettings(BaseModel):
     production_project_id: str = ""
     done_pulse_ms: int = 80
     modbus: PlcModbusSettings = Field(default_factory=PlcModbusSettings)
     opcua: PlcOpcuaSettings = Field(default_factory=PlcOpcuaSettings)
+    socket: PlcSocketSettings = Field(default_factory=PlcSocketSettings)
+    mqtt: PlcMqttSettings = Field(default_factory=PlcMqttSettings)
 
 
 class SettingsUpdate(BaseModel):
@@ -445,6 +460,16 @@ def index() -> FileResponse:
 @app.get("/plc-docs")
 def docs_page() -> FileResponse:
     return FileResponse(STATIC / "docs.html")
+
+
+@app.get("/settings-docs")
+def settings_docs_page() -> FileResponse:
+    return FileResponse(STATIC / "docs.html")
+
+
+@app.get("/socket-test")
+def socket_test_page() -> FileResponse:
+    return FileResponse(STATIC / "socket_test.html")
 
 
 def main() -> None:
