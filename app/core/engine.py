@@ -64,19 +64,31 @@ def _oriented_rect_points(cx: float, cy: float, rw: float, rh: float, angle_deg:
 def _mark_pose(view: np.ndarray, result: dict, src_w: int, src_h: int) -> np.ndarray:
     if src_w <= 0 or src_h <= 0:
         return view
-    box = result.get("box") or (result.get("pose") or {}).get("box")
-    if not box and (result.get("x") is None or not result.get("width") or not result.get("height")):
+    pose = result.get("pose") or {}
+    outlines = result.get("outlines") or pose.get("outlines")
+    outline = result.get("outline") or pose.get("outline")
+    box = result.get("box") or pose.get("box")
+    if not outlines and not outline and not box and (
+        result.get("x") is None or not result.get("width") or not result.get("height")
+    ):
         return view
     marked = view.copy()
     sx = marked.shape[1] / src_w
     sy = marked.shape[0] / src_h
     color = (40, 220, 160) if result.get("judgment") == "OK" else (60, 60, 230)
     thick = max(2, int(round(min(marked.shape[:2]) / 320)))
-    if box and len(box) >= 4:
+    rings: list[np.ndarray] = []
+    if outlines:
+        for ring in outlines:
+            pts = np.asarray(ring, dtype=np.float64)
+            if pts.ndim == 2 and pts.shape[0] >= 3:
+                rings.append(np.column_stack((pts[:, 0] * sx, pts[:, 1] * sy)))
+    elif outline and len(outline) >= 3:
+        pts = np.asarray(outline, dtype=np.float64)
+        rings.append(np.column_stack((pts[:, 0] * sx, pts[:, 1] * sy)))
+    elif box and len(box) >= 4:
         pts = np.asarray(box, dtype=np.float64)
-        pts = np.column_stack((pts[:, 0] * sx, pts[:, 1] * sy))
-        x = float(np.mean(pts[:, 0]))
-        y = float(np.mean(pts[:, 1]))
+        rings.append(np.column_stack((pts[:, 0] * sx, pts[:, 1] * sy)))
     else:
         x = float(result["x"])
         y = float(result["y"])
@@ -86,24 +98,37 @@ def _mark_pose(view: np.ndarray, result: dict, src_w: int, src_h: int) -> np.nda
         pts = _oriented_rect_points(x, y, rw, rh, angle)
         pts[:, 0] *= sx
         pts[:, 1] *= sy
-        x, y = x * sx, y * sy
-    cv2.polylines(marked, [np.int32(np.round(pts))], True, color, thick, cv2.LINE_AA)
+        rings.append(pts)
+    stacked = np.vstack(rings)
+    x = float(np.mean(stacked[:, 0]))
+    y = float(np.mean(stacked[:, 1]))
+    top_y = float(np.min(stacked[:, 1]))
+    for pts in rings:
+        cv2.polylines(marked, [np.int32(np.round(pts))], True, color, thick, cv2.LINE_AA)
     angle = float(result.get("angle") or 0.0)
-    rad = np.deg2rad(angle)
-    rh = float(result.get("height") or 0.0) * sy
-    tip_x = x + (-rh * 0.55) * np.sin(rad)
-    tip_y = y + (-rh * 0.55) * np.cos(rad)
-    cv2.line(
-        marked,
-        (int(round(x)), int(round(y))),
-        (int(round(tip_x)), int(round(tip_y))),
-        color,
-        thick,
-        cv2.LINE_AA,
-    )
-    cv2.drawMarker(marked, (int(round(x)), int(round(y))), color, cv2.MARKER_CROSS, 14, thick)
+    tip = result.get("tip") or pose.get("tip")
+    if tip and len(tip) == 2:
+        p0 = (int(round(float(tip[0][0]) * sx)), int(round(float(tip[0][1]) * sy)))
+        p1 = (int(round(float(tip[1][0]) * sx)), int(round(float(tip[1][1]) * sy)))
+        cv2.line(marked, p0, p1, color, thick, cv2.LINE_AA)
+        cv2.drawMarker(marked, p0, color, cv2.MARKER_CROSS, 12, thick)
+    else:
+        rad = np.deg2rad(angle)
+        tick = max(10.0, float(result.get("height") or 0.0) * sy * 0.2)
+        tip_x = x + (-tick) * np.sin(rad)
+        tip_y = top_y + (-tick) * abs(np.cos(rad))
+        cv2.line(
+            marked,
+            (int(round(x)), int(round(top_y))),
+            (int(round(tip_x)), int(round(tip_y))),
+            color,
+            thick,
+            cv2.LINE_AA,
+        )
+        cv2.drawMarker(marked, (int(round(x)), int(round(top_y))), color, cv2.MARKER_CROSS, 12, thick)
     label = f"{angle:.1f} deg"
-    lx, ly = int(round(x) + 10), int(round(y) - 10)
+    lx, ly = int(round(x) + 10), int(round(top_y) - 10)
+    ly = max(14, ly)
     cv2.putText(marked, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (20, 20, 20), 3, cv2.LINE_AA)
     cv2.putText(marked, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
     return marked

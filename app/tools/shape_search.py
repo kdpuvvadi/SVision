@@ -38,18 +38,36 @@ def _gray(image: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
 
-def _trim_model(gray: np.ndarray, pad: int = 2) -> np.ndarray:
-    """Drop flat border so matching focuses on the pattern."""
+def _content_mask(gray: np.ndarray) -> np.ndarray:
+    """Foreground mask: pixels that differ from the dominant border color."""
     if gray.size == 0:
-        return gray
+        return np.zeros_like(gray, dtype=np.uint8)
     border = np.concatenate(
         [gray[0, :].ravel(), gray[-1, :].ravel(), gray[:, 0].ravel(), gray[:, -1].ravel()]
     )
     bg = float(np.median(border))
-    mask = np.abs(gray.astype(np.float32) - bg) > 12.0
+    mask = (np.abs(gray.astype(np.float32) - bg) > 12.0).astype(np.uint8)
+    if int(mask.sum()) < 16:
+        # Flat / busy border — fall back to Otsu so faint parts still count.
+        blur = cv2.GaussianBlur(gray, (3, 3), 0)
+        _, mask = cv2.threshold(blur, 0, 1, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        # Prefer the smaller class as content when the model is dark-on-light or light-on-dark.
+        if int(mask.sum()) > mask.size // 2:
+            mask = 1 - mask
+    # Light open only — closing bridges nearby parts and fattens the overlay.
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    return mask
+
+
+def _trim_model(gray: np.ndarray, pad: int = 2) -> np.ndarray:
+    """Drop flat border so matching focuses on the pattern."""
+    if gray.size == 0:
+        return gray
+    mask = _content_mask(gray)
     if not np.any(mask):
         return gray
-    ys, xs = np.where(mask)
+    ys, xs = np.where(mask > 0)
     y0 = max(0, int(ys.min()) - pad)
     y1 = min(gray.shape[0], int(ys.max()) + pad + 1)
     x0 = max(0, int(xs.min()) - pad)
@@ -57,6 +75,53 @@ def _trim_model(gray: np.ndarray, pad: int = 2) -> np.ndarray:
     if (x1 - x0) < 8 or (y1 - y0) < 8:
         return gray
     return gray[y0:y1, x0:x1]
+
+
+def _model_outlines(gray: np.ndarray) -> list[np.ndarray]:
+    """External content contours in model-pixel coordinates (each Nx2)."""
+    h, w = gray.shape[:2]
+    fallback = [np.array([[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]], dtype=np.float64)]
+    mask = (_content_mask(gray) * 255).astype(np.uint8)
+    if not np.any(mask):
+        return fallback
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    min_area = max(20.0, 0.002 * float(h * w))
+    outlines: list[np.ndarray] = []
+    for contour in contours:
+        if cv2.contourArea(contour) < min_area:
+            continue
+        # Keep enough points that the warped silhouette still hugs the part.
+        peri = float(cv2.arcLength(contour, True))
+        eps = max(0.6, 0.0035 * peri)
+        approx = cv2.approxPolyDP(contour, eps, True)
+        pts = approx.reshape(-1, 2).astype(np.float64)
+        if pts.shape[0] < 8:
+            # Fallback: uniform resample of the raw contour.
+            raw = contour.reshape(-1, 2).astype(np.float64)
+            step = max(1, len(raw) // 48)
+            pts = raw[::step]
+        if pts.shape[0] >= 3:
+            outlines.append(pts)
+    return outlines or fallback
+
+
+def _model_outline(gray: np.ndarray) -> np.ndarray:
+    """Single outline used for tip/center: largest content contour."""
+    outlines = _model_outlines(gray)
+    return max(outlines, key=lambda pts: float(cv2.contourArea(pts.astype(np.float32))))
+
+
+def _transform_points(aff: np.ndarray, pts: np.ndarray) -> np.ndarray:
+    src = np.asarray(pts, dtype=np.float64).reshape(-1, 1, 2)
+    return cv2.transform(src, aff).reshape(-1, 2)
+
+
+def _oriented_box_points(pts: np.ndarray) -> np.ndarray:
+    """Tight oriented rectangle corners around points (drawing only; ignore OpenCV angle)."""
+    if pts is None or len(pts) < 3:
+        return np.zeros((0, 2), dtype=np.float64)
+    rect = cv2.minAreaRect(np.asarray(pts, dtype=np.float32))
+    return cv2.boxPoints(rect).astype(np.float64)
 
 
 def _downscale(gray: np.ndarray, max_edge: int) -> tuple[np.ndarray, float]:
@@ -192,22 +257,35 @@ def _match_features(search: np.ndarray, model: np.ndarray) -> dict | None:
     aff[:, 2] /= s_scale
 
     mh, mw = model.shape[:2]
-    box = _transform_corners(aff, float(mw), float(mh))
+    outline_srcs = _model_outlines(model)
+    outlines = [_transform_points(aff, src) for src in outline_srcs]
+    all_pts = np.vstack(outlines) if outlines else np.zeros((0, 2), dtype=np.float64)
+    box = _oriented_box_points(all_pts)
+    if box.shape[0] < 4:
+        box = _transform_corners(aff, float(mw), float(mh))
     conf = float(inliers) / float(len(good))
     # Blend with match density so sparse luck doesn't look like a solid hit.
     conf = min(1.0, conf * min(1.0, inliers / 40.0) * 0.35 + conf * 0.65)
-    tip_src = np.array([[[mw / 2.0, 0.0]]], dtype=np.float64)
-    tip_dst = cv2.transform(tip_src, aff).reshape(2)
-    center = box.mean(axis=0)
+    # Orientation tick from the top-most content point, outward.
+    main_src = max(outline_srcs, key=lambda pts: float(cv2.contourArea(pts.astype(np.float32))))
+    top_local = main_src[int(np.argmin(main_src[:, 1]))]
+    tip_anchor = _transform_points(aff, top_local.reshape(1, 2))[0]
+    center = all_pts.mean(axis=0) if all_pts.shape[0] else box.mean(axis=0)
+    outward = tip_anchor - center
+    norm = float(np.hypot(outward[0], outward[1])) or 1.0
+    tip_end = tip_anchor + outward * (12.0 / norm)
+    scale = _affine_scale(aff)
     return {
         "confidence": conf,
         "x": float(center[0]),
         "y": float(center[1]),
-        "width": float(mw) * _affine_scale(aff),
-        "height": float(mh) * _affine_scale(aff),
+        "width": float(mw) * scale,
+        "height": float(mh) * scale,
         "angle": _affine_angle_deg(aff),
         "box": box.tolist(),
-        "tip": [center.tolist(), tip_dst.tolist()],
+        "outline": all_pts.tolist(),
+        "outlines": [pts.tolist() for pts in outlines],
+        "tip": [tip_anchor.tolist(), tip_end.tolist()],
         "method": "sift",
         "inliers": inliers,
         "matches": len(good),
@@ -253,18 +331,35 @@ def _match_template_pyramid(
                 px, py = px_e, py_e
             if best is not None and score <= best["confidence"]:
                 continue
-            corners = np.array([[0.0, 0.0], [mw, 0.0], [mw, mh], [0.0, mh]], dtype=np.float64)
-            ones = np.ones((4, 1), dtype=np.float64)
-            pts = (matrix @ np.hstack([corners, ones]).T).T
-            pts[:, 0] += px
-            pts[:, 1] += py
-            # Up to full search pixels
-            pts /= s_scale
-            tip_local = np.array([[mw / 2.0, 0.0]], dtype=np.float64)
-            tip = (matrix @ np.hstack([tip_local, np.ones((1, 1))]).T).T[0]
-            tip[0] = (tip[0] + px) / s_scale
-            tip[1] = (tip[1] + py) / s_scale
-            center = pts.mean(axis=0)
+            # Contours in the pre-rotation scaled model, then through the same warp used for matching.
+            outline_locals = _model_outlines(scaled)
+            outlines = []
+            for outline_local in outline_locals:
+                ones = np.ones((len(outline_local), 1), dtype=np.float64)
+                outline = (matrix @ np.hstack([outline_local, ones]).T).T
+                outline[:, 0] = (outline[:, 0] + px) / s_scale
+                outline[:, 1] = (outline[:, 1] + py) / s_scale
+                outlines.append(outline)
+            all_pts = np.vstack(outlines) if outlines else np.zeros((0, 2), dtype=np.float64)
+            box = _oriented_box_points(all_pts)
+            if box.shape[0] < 4:
+                corners = np.array([[0.0, 0.0], [mw, 0.0], [mw, mh], [0.0, mh]], dtype=np.float64)
+                ones4 = np.ones((4, 1), dtype=np.float64)
+                box = (matrix @ np.hstack([corners, ones4]).T).T
+                box[:, 0] = (box[:, 0] + px) / s_scale
+                box[:, 1] = (box[:, 1] + py) / s_scale
+            main_local = max(
+                outline_locals,
+                key=lambda pts: float(cv2.contourArea(pts.astype(np.float32))),
+            )
+            top_local = main_local[int(np.argmin(main_local[:, 1]))].reshape(1, 2)
+            tip_anchor = (matrix @ np.hstack([top_local, np.ones((1, 1))]).T).T[0]
+            tip_anchor[0] = (tip_anchor[0] + px) / s_scale
+            tip_anchor[1] = (tip_anchor[1] + py) / s_scale
+            center = all_pts.mean(axis=0)
+            outward = tip_anchor - center
+            norm = float(np.hypot(outward[0], outward[1])) or 1.0
+            tip_end = tip_anchor + outward * (12.0 / norm)
             best = {
                 "confidence": score,
                 "x": float(center[0]),
@@ -272,8 +367,10 @@ def _match_template_pyramid(
                 "width": float(mw) / s_scale,
                 "height": float(mh) / s_scale,
                 "angle": float(angle),
-                "box": pts.tolist(),
-                "tip": [center.tolist(), tip.tolist()],
+                "box": box.tolist(),
+                "outline": all_pts.tolist(),
+                "outlines": [pts.tolist() for pts in outlines],
+                "tip": [tip_anchor.tolist(), tip_end.tolist()],
                 "method": "template",
             }
     return best
@@ -407,14 +504,25 @@ class ShapeSearchTool(Tool):
         box = np.asarray(best["box"], dtype=np.float64)
         box[:, 0] += x0
         box[:, 1] += y0
+        outlines = []
+        for ring in best.get("outlines") or [best.get("outline") or best["box"]]:
+            pts = np.asarray(ring, dtype=np.float64)
+            pts = pts.copy()
+            pts[:, 0] += x0
+            pts[:, 1] += y0
+            outlines.append(pts)
+        outline = np.vstack(outlines) if outlines else box
         tip = np.asarray(best["tip"], dtype=np.float64)
         tip[:, 0] += x0
         tip[:, 1] += y0
+        center = outline.mean(axis=0)
         best = {
             **best,
-            "x": float(box[:, 0].mean()),
-            "y": float(box[:, 1].mean()),
+            "x": float(center[0]),
+            "y": float(center[1]),
             "box": box.tolist(),
+            "outline": outline.tolist(),
+            "outlines": [pts.tolist() for pts in outlines],
             "tip": tip.tolist(),
         }
 
@@ -428,6 +536,8 @@ class ShapeSearchTool(Tool):
             "confidence": best["confidence"],
             "shape": "model",
             "box": best["box"],
+            "outline": best["outline"],
+            "outlines": best["outlines"],
             "method": best.get("method"),
         }
         overlay = self._draw_hit(image, best, passed)
@@ -447,6 +557,8 @@ class ShapeSearchTool(Tool):
             "width": round(best["width"], 1),
             "height": round(best["height"], 1),
             "box": [[round(p[0], 1), round(p[1], 1)] for p in best["box"]],
+            "outline": [[round(p[0], 1), round(p[1], 1)] for p in best["outline"]],
+            "outlines": [[[round(p[0], 1), round(p[1], 1)] for p in ring] for ring in best["outlines"]],
             "pose": pose,
             "message": (
                 f"Pattern  confidence {best['confidence'] * 100:.1f}%  "
@@ -460,17 +572,24 @@ class ShapeSearchTool(Tool):
         view = image.copy()
         color = (40, 220, 160) if passed else (60, 60, 230)
         thick = max(2, int(round(min(view.shape[:2]) / 320)))
-        pts = np.asarray(found["box"], dtype=np.float64)
-        cv2.polylines(view, [np.int32(np.round(pts))], True, color, thick, cv2.LINE_AA)
+        rings = found.get("outlines") or [found.get("outline") or found.get("box") or []]
+        all_pts = []
+        for ring in rings:
+            pts = np.asarray(ring, dtype=np.float64)
+            if pts.shape[0] >= 3:
+                cv2.polylines(view, [np.int32(np.round(pts))], True, color, thick, cv2.LINE_AA)
+                all_pts.append(pts)
         tip = np.asarray(found.get("tip") or [], dtype=np.float64)
         if tip.shape == (2, 2):
             p0 = (int(round(tip[0, 0])), int(round(tip[0, 1])))
             p1 = (int(round(tip[1, 0])), int(round(tip[1, 1])))
             cv2.line(view, p0, p1, color, thick, cv2.LINE_AA)
-            cv2.drawMarker(view, p0, color, cv2.MARKER_CROSS, 16, thick)
+            cv2.drawMarker(view, p0, color, cv2.MARKER_CROSS, 12, thick)
         label = f"{found['confidence'] * 100:.0f}%  {found['angle']:.1f} deg"
-        lx = int(round(found["x"])) + 10
-        ly = int(round(found["y"])) - 12
+        stacked = np.vstack(all_pts) if all_pts else np.array([[found["x"], found["y"]]], dtype=np.float64)
+        lx = int(round(float(found["x"]))) + 14
+        ly = int(round(float(np.min(stacked[:, 1])))) - 10
+        ly = max(18, ly)
         cv2.putText(view, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (20, 20, 20), 3, cv2.LINE_AA)
         cv2.putText(view, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA)
         return view

@@ -1572,12 +1572,28 @@ function whenImageReady(img, fn) {
   else img.addEventListener("load", fn, { once: true });
 }
 
+function resultHasPoseOverlay(result) {
+  if (!result) return false;
+  const pose = result.pose || {};
+  return !!(
+    (result.outline && result.outline.length >= 3) ||
+    (result.box && result.box.length >= 4) ||
+    (pose.outline && pose.outline.length >= 3) ||
+    (pose.box && pose.box.length >= 4)
+  );
+}
+
 function drawPreviewRegion(tool) {
   const canvas = $("regionOverlay");
   const img = $("preview");
   if (!canvas || !img) return;
+  // Measure already burns the pose outline into the JPEG — don't stack the search ROI on top.
+  if (resultHasPoseOverlay(measuredTool(tool?.id)) || img.hidden) {
+    canvas.hidden = true;
+    return;
+  }
   const roi = toolRegion(tool);
-  if (!roi || img.hidden) {
+  if (!roi) {
     canvas.hidden = true;
     return;
   }
@@ -1590,6 +1606,12 @@ function drawToolOutputRegion(tool) {
   if (!frame) return;
   const img = frame.querySelector("img");
   const canvas = frame.querySelector("canvas");
+  if (!canvas) return;
+  if (resultHasPoseOverlay(measuredTool(tool?.id))) {
+    canvas.width = 1;
+    canvas.height = 1;
+    return;
+  }
   const roi = toolRegion(tool);
   if (!roi) return;
   whenImageReady(img, () => strokeRegion(canvas, img, roi));
