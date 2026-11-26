@@ -91,6 +91,8 @@ of the License, or (at your option) any later version.
       <a href="#signals">Signals</a>
       <a href="#modbus">Modbus TCP</a>
       <a href="#opcua">OPC UA</a>
+      <a href="#socket">TCP Socket</a>
+      <a href="#mqtt">MQTT</a>
       <a href="#sequence">Sequence</a>
       <a href="#modscan">Open ModScan</a>
     </div>
@@ -98,9 +100,10 @@ of the License, or (at your option) any later version.
     <h2 id="setup">Setup in SVision</h2>
     <ol>
       <li>Open a scene, add tools, and choose/store an image (or use USB/GigE later).</li>
-      <li>Click <strong>PLC</strong> in the top bar.</li>
-      <li>Set <strong>Production scene</strong> to the scene that should run on trigger.</li>
-      <li>Enable <strong>Modbus TCP</strong> and/or <strong>OPC UA</strong>, set bind host/port/endpoint, then <strong>Save</strong>.</li>
+      <li>Click <strong>Settings</strong> in the top bar (Edit layout).</li>
+      <li>On the PLC tab, set <strong>Production scene</strong> to the scene that should run on trigger.</li>
+      <li>Enable channels with the checkboxes (Modbus, OPC UA, TCP Socket, MQTT). Enabled ones appear as tabs.</li>
+      <li>Configure bind host/port (or endpoint) on each tab, then <strong>Save</strong>.</li>
       <li>Until a live camera is connected, a trigger measures the <strong>currently stored image</strong> for that production scene.</li>
     </ol>
 
@@ -193,6 +196,30 @@ of the License, or (at your option) any later version.
       </tbody>
     </table>
 
+    <h2 id="socket">TCP Socket</h2>
+    <h3>Connection</h3>
+    <ul>
+      <li>SVision is the <strong>TCP server</strong>. Clients connect and receive newline-delimited JSON.</li>
+      <li>Default bind: <code>0.0.0.0:9100</code>.</li>
+      <li><code>run.bat</code> also starts the <strong>Socket test</strong> desktop viewer.</li>
+    </ul>
+    <h3>Commands</h3>
+    <ul>
+      <li>Send <code>{"cmd":"trigger"}</code> or <code>TRIGGER</code> (plus newline) to start one measure.</li>
+    </ul>
+    <h3>Result JSON</h3>
+    <p>Each measure publishes one object with <code>scene</code>, <code>flow</code>, <code>tools</code> (per-tool judgment), <code>results</code>, <code>judgment</code>, <code>elapsed_ms</code>, and <code>message</code>. Previews are omitted to keep the payload small.</p>
+
+    <h2 id="mqtt">MQTT</h2>
+    <h3>Connection</h3>
+    <ul>
+      <li>SVision runs a lightweight <strong>MQTT 3.1.1 broker</strong> (QoS 0).</li>
+      <li>Default bind: <code>0.0.0.0:1883</code>, topic <code>svision/results</code>.</li>
+      <li>Subscribe with MQTT Explorer, mosquitto_sub, or any MQTT client.</li>
+    </ul>
+    <h3>Payload</h3>
+    <p>Same JSON shape as the TCP socket result.</p>
+
     <h2 id="sequence">Typical PLC sequence</h2>
     <pre>1. Wait READY = 1
 2. Pulse TRIGGER = 1 (rising edge)
@@ -214,7 +241,7 @@ of the License, or (at your option) any later version.
     <ul>
       <li>Web <strong>Measure</strong> is for debug; production should use Modbus/OPC TRIGGER.</li>
       <li>Only one measure runs at a time. Triggers while BUSY are ignored.</li>
-      <li>Firewall: allow TCP <code>1502</code> (Modbus) and <code>4840</code> (OPC UA) if connecting from another PC.</li>
+      <li>Firewall: allow TCP <code>1502</code> (Modbus), <code>4840</code> (OPC UA), <code>9100</code> (socket), and <code>1883</code> (MQTT) if connecting from another PC.</li>
     </ul>
   </div>
 </body>

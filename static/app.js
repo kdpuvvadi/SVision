@@ -646,15 +646,49 @@ function plcDefaults() {
     done_pulse_ms: 80,
     modbus: { enabled: false, host: "0.0.0.0", port: 1502, unit_id: 1 },
     opcua: { enabled: false, endpoint: "opc.tcp://0.0.0.0:4840/svision/" },
+    socket: { enabled: false, host: "0.0.0.0", port: 9100 },
+    mqtt: { enabled: false, host: "0.0.0.0", port: 1883, topic: "svision/results" },
   };
 }
 
-async function openPlcSettings() {
+function settingsActiveTab() {
+  return state.settingsTab || "plc";
+}
+
+function syncSettingsTabs() {
+  const enabled = {
+    modbus: $("plcModbusEnabled").checked,
+    opcua: $("plcOpcEnabled").checked,
+    socket: $("plcSocketEnabled").checked,
+    mqtt: $("plcMqttEnabled").checked,
+  };
+  const tabs = [
+    { id: "plc", label: "PLC" },
+    enabled.modbus ? { id: "modbus", label: "Modbus" } : null,
+    enabled.opcua ? { id: "opcua", label: "OPC UA" } : null,
+    enabled.socket ? { id: "socket", label: "Socket" } : null,
+    enabled.mqtt ? { id: "mqtt", label: "MQTT" } : null,
+    { id: "docs", label: "Docs" },
+  ].filter(Boolean);
+  let active = settingsActiveTab();
+  if (!tabs.some((t) => t.id === active)) active = "plc";
+  state.settingsTab = active;
+  $("settingsTabs").innerHTML = tabs.map((t) =>
+    `<button type="button" data-tab="${t.id}" class="${t.id === active ? "active" : ""}">${t.label}</button>`
+  ).join("");
+  document.querySelectorAll(".settings-panel").forEach((panel) => {
+    panel.hidden = panel.dataset.panel !== active;
+  });
+}
+
+async function openSettings() {
   const settings = await api("/api/settings");
   state.settings = settings;
   const plc = { ...plcDefaults(), ...(settings.plc || {}) };
   plc.modbus = { ...plcDefaults().modbus, ...(plc.modbus || {}) };
   plc.opcua = { ...plcDefaults().opcua, ...(plc.opcua || {}) };
+  plc.socket = { ...plcDefaults().socket, ...(plc.socket || {}) };
+  plc.mqtt = { ...plcDefaults().mqtt, ...(plc.mqtt || {}) };
   const projects = state.projects.length ? state.projects : await api("/api/projects");
   state.projects = projects;
   $("plcProject").innerHTML = projects.map((p) =>
@@ -668,8 +702,17 @@ async function openPlcSettings() {
   $("plcModbusUnit").value = plc.modbus.unit_id || 1;
   $("plcOpcEnabled").checked = !!plc.opcua.enabled;
   $("plcOpcEndpoint").value = plc.opcua.endpoint || "opc.tcp://0.0.0.0:4840/svision/";
+  $("plcSocketEnabled").checked = !!plc.socket.enabled;
+  $("plcSocketHost").value = plc.socket.host || "0.0.0.0";
+  $("plcSocketPort").value = plc.socket.port || 9100;
+  $("plcMqttEnabled").checked = !!plc.mqtt.enabled;
+  $("plcMqttHost").value = plc.mqtt.host || "0.0.0.0";
+  $("plcMqttPort").value = plc.mqtt.port || 1883;
+  $("plcMqttTopic").value = plc.mqtt.topic || "svision/results";
+  state.settingsTab = "plc";
+  syncSettingsTabs();
   await refreshPlcStatus();
-  $("plcModal").hidden = false;
+  $("settingsModal").hidden = false;
 }
 
 async function refreshPlcStatus() {
@@ -678,12 +721,45 @@ async function refreshPlcStatus() {
     const hs = status.handshake || {};
     const mb = status.modbus || {};
     const opc = status.opcua || {};
+    const sock = status.socket || {};
+    const mqtt = status.mqtt || {};
     $("plcStatus").textContent = [
       `Handshake  ready=${hs.ready} busy=${hs.busy} ok=${hs.ok} ng=${hs.ng} error=${hs.error}`,
-      `Modbus  running=${mb.running} ${mb.host || ""}:${mb.port || ""} ${mb.error || ""}`,
-      `OPC UA  running=${opc.running} ${opc.endpoint || ""} ${opc.error || ""}`,
+      `Modbus  enabled-run=${mb.running} ${mb.error || ""}`,
+      `OPC UA  enabled-run=${opc.running} ${opc.error || ""}`,
+      `Socket  enabled-run=${sock.running} clients=${sock.clients || 0} ${sock.error || ""}`,
+      `MQTT    enabled-run=${mqtt.running} clients=${mqtt.clients || 0} ${mqtt.error || ""}`,
       hs.last_error ? `Last error: ${hs.last_error}` : "",
     ].filter(Boolean).join("\n");
+    if ($("modbusStatus")) {
+      $("modbusStatus").textContent = `running=${mb.running} ${mb.host || ""}:${mb.port || ""} unit=${mb.unit_id || ""} ${mb.error || ""}`;
+    }
+    if ($("opcuaStatus")) {
+      $("opcuaStatus").textContent = `running=${opc.running} ${opc.endpoint || ""} ${opc.error || ""}`;
+    }
+    if ($("socketStatus")) {
+      $("socketStatus").textContent = `running=${sock.running} clients=${sock.clients || 0} ${sock.error || ""}`;
+    }
+    if ($("mqttStatus")) {
+      $("mqttStatus").textContent = `running=${mqtt.running} clients=${mqtt.clients || 0} topic=${mqtt.topic || ""} ${mqtt.error || ""}`;
+    }
+    const sockLines = [
+      `Protocol: TCP JSON lines`,
+      `Bind: ${(sock.host || "0.0.0.0")}:${sock.port || 9100}`,
+      `Connect from clients:`,
+      ...((sock.connect || []).map((c) => `  ${c}`)),
+      sock.hint || "",
+    ].filter(Boolean);
+    if ($("socketServerInfo")) $("socketServerInfo").textContent = sockLines.join("\n");
+    const mqttLines = [
+      `Protocol: MQTT 3.1.1 broker`,
+      `Bind: ${(mqtt.host || "0.0.0.0")}:${mqtt.port || 1883}`,
+      `Topic: ${mqtt.topic || "svision/results"}`,
+      `Connect / subscribe:`,
+      ...((mqtt.connect || []).map((c) => `  ${c}`)),
+      mqtt.hint || "",
+    ].filter(Boolean);
+    if ($("mqttServerInfo")) $("mqttServerInfo").textContent = mqttLines.join("\n");
   } catch (err) {
     $("plcStatus").textContent = err.message;
   }
@@ -747,7 +823,7 @@ async function pollPlcLive() {
   return false;
 }
 
-async function savePlcSettings() {
+async function saveSettings() {
   const plc = {
     production_project_id: $("plcProject").value,
     done_pulse_ms: Number($("plcDonePulse").value) || 80,
@@ -761,12 +837,24 @@ async function savePlcSettings() {
       enabled: $("plcOpcEnabled").checked,
       endpoint: $("plcOpcEndpoint").value.trim() || "opc.tcp://0.0.0.0:4840/svision/",
     },
+    socket: {
+      enabled: $("plcSocketEnabled").checked,
+      host: $("plcSocketHost").value.trim() || "0.0.0.0",
+      port: Number($("plcSocketPort").value) || 9100,
+    },
+    mqtt: {
+      enabled: $("plcMqttEnabled").checked,
+      host: $("plcMqttHost").value.trim() || "0.0.0.0",
+      port: Number($("plcMqttPort").value) || 1883,
+      topic: $("plcMqttTopic").value.trim() || "svision/results",
+    },
   };
   state.settings = await api("/api/settings", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ plc }),
   });
+  syncSettingsTabs();
   await refreshPlcStatus();
   $("plcStatus").textContent += "\nSaved.";
 }
@@ -802,12 +890,20 @@ function bind() {
     showLayout("edit");
     persistLayout();
   });
-  $("plcSettingsBtn").addEventListener("click", () => openPlcSettings().catch((err) => alert(err.message)));
-  $("docsBtn").addEventListener("click", () => { window.open("/plc-docs", "_blank", "noopener"); });
-  $("plcClose").addEventListener("click", () => { $("plcModal").hidden = true; });
-  $("plcSave").addEventListener("click", () => savePlcSettings().catch((err) => { $("plcStatus").textContent = err.message; }));
-  $("plcModal").addEventListener("click", (e) => {
-    if (e.target.id === "plcModal") $("plcModal").hidden = true;
+  $("settingsBtn").addEventListener("click", () => openSettings().catch((err) => alert(err.message)));
+  $("settingsClose").addEventListener("click", () => { $("settingsModal").hidden = true; });
+  $("settingsSave").addEventListener("click", () => saveSettings().catch((err) => { $("plcStatus").textContent = err.message; }));
+  $("settingsModal").addEventListener("click", (e) => {
+    if (e.target.id === "settingsModal") $("settingsModal").hidden = true;
+  });
+  $("settingsTabs").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-tab]");
+    if (!btn) return;
+    state.settingsTab = btn.dataset.tab;
+    syncSettingsTabs();
+  });
+  ["plcModbusEnabled", "plcOpcEnabled", "plcSocketEnabled", "plcMqttEnabled"].forEach((id) => {
+    $(id).addEventListener("change", () => syncSettingsTabs());
   });
   $("saveFlowBtn").addEventListener("click", async () => {
     try {

@@ -22,7 +22,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>SVision</title>
-  <link rel="stylesheet" href="/static/styles.css?v=30" />
+  <link rel="stylesheet" href="/static/styles.css?v=31" />
 </head>
 <body class="mode-inspect">
   <header class="topbar">
@@ -45,8 +45,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
       <label class="file-btn edit-only" id="importProjectLabel">Import<input id="importProject" type="file" accept=".svision,application/octet-stream" hidden /></label>
       <span class="layout-badge" id="layoutBadge">Layout: <b id="layoutName">Inspection</b></span>
       <button id="switchLayout" type="button"><span class="label-full">Switch layout</span><span class="label-short">Layout</span></button>
-      <button id="plcSettingsBtn" class="edit-only" type="button">PLC</button>
-      <button id="docsBtn" class="edit-only" type="button">Docs</button>
+      <button id="settingsBtn" class="edit-only" type="button">Settings</button>
     </div>
     <div class="host" id="hostInfo">Starting…</div>
   </header>
@@ -88,35 +87,73 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
     </div>
   </div>
 
-  <div id="plcModal" class="modal" hidden>
-    <div class="modal-card">
+  <div id="settingsModal" class="modal" hidden>
+    <div class="modal-card settings-modal-card">
       <div class="modal-head">
-        <h2>PLC handshake</h2>
-        <button id="plcClose" type="button">Close</button>
+        <h2>Settings</h2>
+        <button id="settingsClose" type="button">Close</button>
       </div>
-      <p class="hint">Measure runs on a worker thread. Modbus TCP and OPC UA share the same TRIGGER / OK / NG bits. See <a href="/plc-docs" target="_blank" rel="noopener">PLC documentation</a>.</p>
-      <label>Production scene
-        <select id="plcProject"></select>
-      </label>
-      <label>Result pulse (ms)
-        <input id="plcDonePulse" type="number" min="10" max="2000" step="10" />
-      </label>
-      <p class="hint">Pulse width for DONE + OK / NG / ERROR coils. Holding registers (elapsed / judgment) stay until the next measure.</p>
-      <fieldset>
-        <legend>Modbus TCP</legend>
-        <label class="check"><input id="plcModbusEnabled" type="checkbox" /> Enable</label>
-        <label>Bind host<input id="plcModbusHost" type="text" /></label>
-        <label>Port<input id="plcModbusPort" type="number" min="1" max="65535" /></label>
-        <label>Unit id<input id="plcModbusUnit" type="number" min="1" max="247" /></label>
-      </fieldset>
-      <fieldset>
-        <legend>OPC UA</legend>
-        <label class="check"><input id="plcOpcEnabled" type="checkbox" /> Enable</label>
-        <label>Endpoint<input id="plcOpcEndpoint" type="text" /></label>
-      </fieldset>
-      <div id="plcStatus" class="plc-status hint"></div>
+      <div class="settings-layout">
+        <aside class="settings-side">
+          <h3>Communications</h3>
+          <label class="check"><input id="plcModbusEnabled" type="checkbox" data-comm="modbus" /> Modbus TCP</label>
+          <label class="check"><input id="plcOpcEnabled" type="checkbox" data-comm="opcua" /> OPC UA</label>
+          <label class="check"><input id="plcSocketEnabled" type="checkbox" data-comm="socket" /> TCP Socket</label>
+          <label class="check"><input id="plcMqttEnabled" type="checkbox" data-comm="mqtt" /> MQTT</label>
+          <p class="hint">Enabled channels appear as tabs. Save to start/stop servers.</p>
+        </aside>
+        <div class="settings-main">
+          <div class="settings-tabs" id="settingsTabs"></div>
+          <div class="settings-panels">
+            <div class="settings-panel" data-panel="plc" id="panelPlc">
+              <h3>PLC / production</h3>
+              <p class="hint">Measure runs on a worker thread. Enabled protocols share the same production scene.</p>
+              <label>Production scene
+                <select id="plcProject"></select>
+              </label>
+              <label>Result pulse (ms)
+                <input id="plcDonePulse" type="number" min="10" max="2000" step="10" />
+              </label>
+              <p class="hint">Pulse width for DONE + OK / NG / ERROR (Modbus / OPC). Holding values stay until the next measure.</p>
+              <div id="plcStatus" class="plc-status hint"></div>
+            </div>
+            <div class="settings-panel" data-panel="modbus" id="panelModbus" hidden>
+              <h3>Modbus TCP</h3>
+              <label>Bind host<input id="plcModbusHost" type="text" /></label>
+              <label>Port<input id="plcModbusPort" type="number" min="1" max="65535" /></label>
+              <label>Unit id<input id="plcModbusUnit" type="number" min="1" max="247" /></label>
+              <div id="modbusStatus" class="plc-status hint"></div>
+            </div>
+            <div class="settings-panel" data-panel="opcua" id="panelOpcua" hidden>
+              <h3>OPC UA</h3>
+              <label>Endpoint<input id="plcOpcEndpoint" type="text" /></label>
+              <div id="opcuaStatus" class="plc-status hint"></div>
+            </div>
+            <div class="settings-panel" data-panel="socket" id="panelSocket" hidden>
+              <h3>TCP Socket</h3>
+              <label>Bind host<input id="plcSocketHost" type="text" /></label>
+              <label>Port<input id="plcSocketPort" type="number" min="1" max="65535" /></label>
+              <div id="socketServerInfo" class="comm-server-box hint"></div>
+              <p class="hint">Clients receive newline-delimited JSON (scene, tools, per-tool results, final judgment). Send <code>{"cmd":"trigger"}</code> or <code>TRIGGER</code> to measure.</p>
+              <div id="socketStatus" class="plc-status hint"></div>
+            </div>
+            <div class="settings-panel" data-panel="mqtt" id="panelMqtt" hidden>
+              <h3>MQTT</h3>
+              <label>Bind host<input id="plcMqttHost" type="text" /></label>
+              <label>Port<input id="plcMqttPort" type="number" min="1" max="65535" /></label>
+              <label>Topic<input id="plcMqttTopic" type="text" /></label>
+              <div id="mqttServerInfo" class="comm-server-box hint"></div>
+              <p class="hint">SVision runs a lightweight MQTT 3.1.1 broker. Subscribe to the topic to receive the same JSON result payload as TCP.</p>
+              <div id="mqttStatus" class="plc-status hint"></div>
+            </div>
+            <div class="settings-panel" data-panel="docs" id="panelDocs" hidden>
+              <iframe id="settingsDocsFrame" class="settings-docs-frame" title="Communications documentation" src="/settings-docs"></iframe>
+            </div>
+          </div>
+        </div>
+      </div>
       <div class="modal-actions">
-        <button id="plcSave" type="button" class="primary">Save</button>
+        <button id="settingsSave" type="button" class="primary">Save</button>
       </div>
     </div>
   </div>
@@ -199,6 +236,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
     </section>
   </main>
   <script src="/static/tool_ui.js?v=5"></script>
-  <script src="/static/app.js?v=40"></script>
+  <script src="/static/app.js?v=41"></script>
 </body>
 </html>
