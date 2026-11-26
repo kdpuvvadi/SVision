@@ -476,7 +476,14 @@ class ProjectStore:
     def load_sample_image(self, project_id: str, tool_id: str, sample_id: str) -> np.ndarray:
         return self._decode(self.sample_path(project_id, tool_id, sample_id).read_bytes())
 
-    def register_shape_model(self, project_id: str, tool_id: str, raw: bytes, roi: dict | None) -> dict:
+    def register_shape_model(
+        self,
+        project_id: str,
+        tool_id: str,
+        raw: bytes,
+        roi: dict | None,
+        figures: list | None = None,
+    ) -> dict:
         self._require_tool(project_id, tool_id)
         image = self._decode(raw)
         roi = roi or {}
@@ -502,7 +509,7 @@ class ProjectStore:
 
         from app.tools.shape_search import build_solid_model
 
-        solid = build_solid_model(crop)
+        solid = build_solid_model(crop, figures=figures)
         folder = _tool_dir(project_id, tool_id)
         folder.mkdir(parents=True, exist_ok=True)
         # Gray = matcher input; edges = solid figure; display = UI preview with green contours.

@@ -22,7 +22,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>SVision</title>
-  <link rel="stylesheet" href="/static/styles.css?v=28" />
+  <link rel="stylesheet" href="/static/styles.css?v=29" />
 </head>
 <body class="mode-inspect">
   <header class="topbar">
@@ -50,6 +50,43 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
     </div>
     <div class="host" id="hostInfo">Starting…</div>
   </header>
+
+  <div id="modelModal" class="modal" hidden>
+    <div class="modal-card model-modal-card">
+      <div class="modal-head">
+        <h2>Shape Search · Model</h2>
+        <button id="modelEditCancel" type="button">Close</button>
+      </div>
+      <div class="model-steps">
+        <span id="modelStepRegion" class="model-step active">1. Region</span>
+        <span id="modelStepFigures" class="model-step">2. Figures</span>
+      </div>
+      <div class="model-modal-layout">
+        <aside class="model-modal-side">
+          <button id="modelEditUpdate" type="button" class="primary">Update</button>
+          <p class="hint">Update runs Camera → prior tools, then shows that image here.</p>
+          <div id="modelFigureTools" class="fig-tools" hidden>
+            <button type="button" data-fig-tool="rect" class="active" title="Rectangle">▭</button>
+            <button type="button" data-fig-tool="circle" title="Circle">○</button>
+            <button type="button" data-fig-tool="donut" title="Double circle">◎</button>
+            <button type="button" data-fig-tool="polygon" title="Polygon (double-click to close)">⬠</button>
+          </div>
+          <ul id="modelFigureList" class="fig-list"></ul>
+          <button id="modelFigDelete" type="button">Delete figure</button>
+          <canvas id="modelNavCanvas" width="180" height="120"></canvas>
+          <p id="modelEditStatus" class="hint"></p>
+        </aside>
+        <div class="model-modal-stage">
+          <canvas id="modelEditCanvas" width="860" height="520"></canvas>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button id="modelEditBack" type="button" hidden>Back</button>
+        <button id="modelEditNext" type="button" class="primary">Next · Figures</button>
+        <button id="modelEditSave" type="button" class="primary" hidden>Save model</button>
+      </div>
+    </div>
+  </div>
 
   <div id="plcModal" class="modal" hidden>
     <div class="modal-card">
@@ -161,7 +198,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
       </div>
     </section>
   </main>
-  <script src="/static/tool_ui.js?v=4"></script>
-  <script src="/static/app.js?v=38"></script>
+  <script src="/static/tool_ui.js?v=5"></script>
+  <script src="/static/app.js?v=39"></script>
 </body>
 </html>

@@ -181,25 +181,68 @@ def _edges(gray: np.ndarray) -> np.ndarray:
     return cv2.Canny(blur, 40, 120)
 
 
-def build_solid_model(crop: np.ndarray) -> dict[str, Any]:
+def _figure_mask(h: int, w: int, figures: list[dict[str, Any]] | None) -> np.ndarray | None:
+    """Build a binary mask from registered figures (normalized 0–1 inside the crop)."""
+    if not figures:
+        return None
+    mask = np.zeros((h, w), dtype=np.uint8)
+    drew = False
+    for fig in figures:
+        kind = (fig.get("type") or "rect").lower()
+        if kind in {"rect", "rectangle"}:
+            x0 = int(round(float(fig.get("x", 0)) * w))
+            y0 = int(round(float(fig.get("y", 0)) * h))
+            x1 = int(round((float(fig.get("x", 0)) + float(fig.get("w", 1))) * w))
+            y1 = int(round((float(fig.get("y", 0)) + float(fig.get("h", 1))) * h))
+            cv2.rectangle(mask, (x0, y0), (x1, y1), 255, -1)
+            drew = True
+        elif kind == "circle":
+            cx = int(round(float(fig.get("cx", 0.5)) * w))
+            cy = int(round(float(fig.get("cy", 0.5)) * h))
+            r = int(round(float(fig.get("r", 0.25)) * min(w, h)))
+            cv2.circle(mask, (cx, cy), max(1, r), 255, -1)
+            drew = True
+        elif kind in {"donut", "double_circle", "ring"}:
+            cx = int(round(float(fig.get("cx", 0.5)) * w))
+            cy = int(round(float(fig.get("cy", 0.5)) * h))
+            r_out = int(round(float(fig.get("r_outer", fig.get("r", 0.35))) * min(w, h)))
+            r_in = int(round(float(fig.get("r_inner", r_out * 0.5 / max(min(w, h), 1))) * min(w, h)))
+            cv2.circle(mask, (cx, cy), max(1, r_out), 255, -1)
+            cv2.circle(mask, (cx, cy), max(0, min(r_in, r_out - 1)), 0, -1)
+            drew = True
+        elif kind == "polygon":
+            pts = np.asarray(fig.get("points") or [], dtype=np.float64)
+            if pts.ndim == 2 and pts.shape[0] >= 3:
+                px = np.column_stack([pts[:, 0] * w, pts[:, 1] * h]).astype(np.int32)
+                cv2.fillPoly(mask, [px], 255)
+                drew = True
+    return mask if drew else None
+
+
+def build_solid_model(crop: np.ndarray, figures: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Build an Omron-style shape model from the selected region.
 
-    The registered figure is the edge/contour set extracted inside the box — not
-    only the raw pixels. Matching and overlays use that solid shape.
+    Optional ``figures`` (rect / circle / donut / polygon) limit which pixels
+    contribute. Edges inside those figures become the solid registered model.
     """
     gray = _gray(crop)
     gray = _trim_model(gray, pad=1)
     if min(gray.shape[:2]) < 8:
         raise ValueError("Draw a larger region around the pattern.")
+    h, w = gray.shape[:2]
+    mask = _figure_mask(h, w, figures)
+    if mask is not None:
+        gray = cv2.bitwise_and(gray, gray, mask=mask)
     blur = cv2.GaussianBlur(gray, (3, 3), 0)
     edges = cv2.Canny(blur, 40, 120)
+    if mask is not None:
+        edges = cv2.bitwise_and(edges, edges, mask=mask)
     # Strengthen thin edges so the registered figure is visible and matchable.
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
     edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=1)
     contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
-    h, w = gray.shape[:2]
     min_len = max(12, int(0.04 * (w + h)))
-    figures: list[list[list[float]]] = []
+    edge_figures: list[list[list[float]]] = []
     for contour in contours:
         if len(contour) < min_len:
             continue
@@ -208,27 +251,28 @@ def build_solid_model(crop: np.ndarray) -> dict[str, Any]:
         pts = approx.reshape(-1, 2).astype(np.float64)
         if pts.shape[0] < 3:
             continue
-        figures.append([[float(p[0]), float(p[1])] for p in pts])
-    if not figures:
+        edge_figures.append([[float(p[0]), float(p[1])] for p in pts])
+    if not edge_figures:
         # Fall back to content outline so registration never stores an empty model.
         for ring in _model_outlines(gray):
-            figures.append([[float(p[0]), float(p[1])] for p in ring])
+            edge_figures.append([[float(p[0]), float(p[1])] for p in ring])
             edges = np.zeros_like(gray)
             cv2.polylines(edges, [np.int32(np.round(ring))], True, 255, 1)
     # Display image: gray part with cyan edge figure (Omron-style "model image").
     display = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-    for fig in figures:
+    for fig in edge_figures:
         cv2.polylines(display, [np.int32(np.round(np.asarray(fig)))], True, (40, 220, 160), 1, cv2.LINE_AA)
     edge_points = int(np.count_nonzero(edges))
     return {
         "gray": gray,
         "edges": edges,
         "display": display,
-        "figures": figures,
+        "figures": edge_figures,
+        "user_figures": figures or [],
         "width": int(w),
         "height": int(h),
         "edge_points": edge_points,
-        "figure_count": len(figures),
+        "figure_count": len(edge_figures),
     }
 
 
@@ -554,8 +598,8 @@ class ShapeSearchTool(Tool):
 
     def status(self) -> str:
         return (
-            "Model: draw a figure on the image and Register — SVision extracts the solid edge "
-            "shape inside that region (Omron-style), then searches for it."
+            "Open Model editor: Update pulls the image through prior tools, select a region, "
+            "draw figures (rectangle / circle / double circle / polygon), Save solid model."
         )
 
     def mount(self, app) -> None:

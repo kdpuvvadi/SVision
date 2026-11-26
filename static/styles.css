@@ -522,6 +522,75 @@ article header label { flex-direction: row; align-items: center; color: var(--te
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .plc-status { white-space: pre-wrap; min-height: 3em; }
 
+.model-modal-card {
+  width: min(1100px, 100%);
+  max-height: min(92vh, 860px);
+}
+.model-steps { display: flex; gap: 10px; }
+.model-step {
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 13px;
+}
+.model-step.active {
+  background: var(--ok);
+  color: #062a24;
+  border-color: var(--ok);
+  font-weight: 600;
+}
+.model-modal-layout {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 12px;
+  min-height: 420px;
+}
+.model-modal-side {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.model-modal-stage {
+  background: #0a0c0e;
+  border: 1px solid var(--line);
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+#modelEditCanvas { max-width: 100%; cursor: crosshair; touch-action: none; }
+#modelNavCanvas {
+  width: 100%;
+  background: #0a0c0e;
+  border: 1px solid var(--line);
+}
+.fig-tools { display: flex; flex-wrap: wrap; gap: 6px; }
+.fig-tools button {
+  min-width: 36px;
+  font-size: 16px;
+  line-height: 1.2;
+}
+.fig-tools button.active {
+  background: var(--ok);
+  color: #062a24;
+}
+.fig-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 140px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  background: #12161a;
+}
+.fig-list li {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+  font-size: 12px;
+}
+.fig-list li.selected { background: #1a3030; color: var(--ok); }
+.fig-list li.hint { color: var(--muted); cursor: default; }
+
 .robot-tray {
   display: flex;
   flex-wrap: wrap;

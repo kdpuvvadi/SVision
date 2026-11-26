@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from fastapi import File, Form, HTTPException, UploadFile
@@ -36,16 +37,24 @@ def mount(app: Any) -> None:
         w: float = Form(1),
         h: float = Form(1),
         angle: float = Form(0),
+        figures: str = Form("[]"),
     ) -> dict:
         raw = await file.read()
         if not raw:
             raise HTTPException(400, "Choose an image, then draw the pattern.")
+        try:
+            parsed = json.loads(figures or "[]")
+            if not isinstance(parsed, list):
+                parsed = []
+        except json.JSONDecodeError as exc:
+            raise HTTPException(400, "Invalid figures JSON.") from exc
         try:
             return store.register_shape_model(
                 project_id,
                 tool_id,
                 raw,
                 {"x": x, "y": y, "w": w, "h": h, "angle": angle},
+                figures=parsed,
             )
         except FileNotFoundError as exc:
             raise HTTPException(404, str(exc)) from exc
