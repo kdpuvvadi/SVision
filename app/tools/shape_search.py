@@ -169,11 +169,30 @@ def _downscale(gray: np.ndarray, max_edge: int) -> tuple[np.ndarray, float]:
     return out, scale
 
 
+def _border_fill_value(gray: np.ndarray) -> int:
+    """Median of the template rim — avoids black pads that kill NCC on light decks."""
+    if gray.size == 0:
+        return 0
+    h, w = gray.shape[:2]
+    if h < 3 or w < 3:
+        return int(np.median(gray))
+    rim = np.concatenate(
+        [
+            gray[0, :].ravel(),
+            gray[-1, :].ravel(),
+            gray[:, 0].ravel(),
+            gray[:, -1].ravel(),
+        ]
+    )
+    return int(np.median(rim))
+
+
 def _rotate_template(
     gray: np.ndarray,
     angle: float,
     *,
     nearest: bool = False,
+    border_value: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     h, w = gray.shape[:2]
     if abs(angle) < 0.05:
@@ -182,12 +201,20 @@ def _rotate_template(
     matrix = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), float(angle), 1.0)
     cos = abs(matrix[0, 0])
     sin = abs(matrix[0, 1])
-    nw = int(h * sin + w * cos)
-    nh = int(h * cos + w * sin)
+    nw = max(1, int(np.ceil(h * sin + w * cos)))
+    nh = max(1, int(np.ceil(h * cos + w * sin)))
     matrix[0, 2] += (nw - w) / 2.0
     matrix[1, 2] += (nh - h) / 2.0
     flags = cv2.INTER_NEAREST if nearest else cv2.INTER_LINEAR
-    out = cv2.warpAffine(gray, matrix, (nw, nh), flags=flags, borderValue=0)
+    fill = 0 if nearest else (border_value if border_value is not None else _border_fill_value(gray))
+    out = cv2.warpAffine(
+        gray,
+        matrix,
+        (nw, nh),
+        flags=flags,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=int(fill),
+    )
     return out, matrix
 
 
@@ -485,20 +512,22 @@ def _match_template_pyramid(
     scales = [0.50, 0.60, 0.70, 0.80, 0.90, 1.0, 1.08]
     best = None
     mh0, mw0 = model_s.shape[:2]
+    fill = _border_fill_value(model_s)
     for scale in scales:
         mw = max(8, int(round(mw0 * scale)))
         mh = max(8, int(round(mh0 * scale)))
         scaled = cv2.resize(model_s, (mw, mh), interpolation=cv2.INTER_LINEAR)
         scaled_e = cv2.resize(edges_s, (mw, mh), interpolation=cv2.INTER_NEAREST)
         for angle in angles:
-            templ, matrix = _rotate_template(scaled, angle)
+            templ, matrix = _rotate_template(scaled, angle, border_value=fill)
             templ_e, _ = _rotate_template(scaled_e, angle, nearest=True)
             if templ.shape[0] >= search_s.shape[0] or templ.shape[1] >= search_s.shape[1]:
                 continue
             score_g, px_g, py_g = _match_template_once(search_s, templ, opencl)
             score_e, px_e, py_e = _match_template_once(search_e, templ_e, opencl)
             # Gray owns pose under rotation — edge maps smear and invent peaks.
-            # Only blend edges when their peak sits on the same hit.
+            # Edges may only boost a gray hit, never pull it down (that made true
+            # slight angles lose to a weaker gray-only miss).
             px, py = px_g, py_g
             score = max(0.0, float(score_g))
             if (
@@ -506,14 +535,16 @@ def _match_template_pyramid(
                 and abs(px_e - px_g) <= 4
                 and abs(py_e - py_g) <= 4
             ):
-                score = float(0.60 * score_g + 0.40 * max(0.0, score_e))
+                blended = float(0.60 * score_g + 0.40 * max(0.0, score_e))
+                if blended > score:
+                    score = blended
             if best is not None:
                 gain = score - float(best["confidence"])
-                # Prefer higher score. For tiny gains at larger |angle|, keep the
-                # previous hit — suppresses ±step flicker without blocking real rotation.
+                # Prefer higher score. Tiny gains at larger |angle| can still be the
+                # true pose after border-fill rotation — keep hysteresis low.
                 if gain < -1e-9:
                     continue
-                if gain < 0.01 and abs(angle) > abs(float(best["angle"])) + 1e-6:
+                if gain < 0.002 and abs(angle) > abs(float(best["angle"])) + 1e-6:
                     continue
                 if gain <= 1e-9:
                     continue
@@ -616,32 +647,41 @@ def _refine_template_hit(
     hit: dict,
     opencl: bool = False,
 ) -> dict:
-    """Full-resolution polish around a pyramid hit — lifts borderline rotated scores."""
+    """Full-resolution polish around a pyramid hit — recovers slight rotation accurately."""
     if hit is None:
         return hit
     angle0 = float(hit.get("angle") or 0)
     edges = model_edges if model_edges is not None and model_edges.size else _edges(model)
-    model_f, edges_f = _fit_model_into_search(model, edges, search, [angle0 - 4, angle0, angle0 + 4])
+    # Wide enough that a coarse pyramid miss of a few degrees can still snap back.
+    angle_span = list(np.arange(angle0 - 8.0, angle0 + 8.0 + 1e-6, 1.0))
+    model_f, edges_f = _fit_model_into_search(model, edges, search, angle_span)
     search_e = _edges(search)
     best = hit
-    for scale in (0.85, 0.92, 1.0, 1.06):
+    fill = _border_fill_value(model_f)
+    for scale in (0.88, 0.96, 1.0, 1.06):
         mw = max(8, int(round(model_f.shape[1] * scale)))
         mh = max(8, int(round(model_f.shape[0] * scale)))
         scaled = cv2.resize(model_f, (mw, mh), interpolation=cv2.INTER_LINEAR)
         scaled_e = cv2.resize(edges_f, (mw, mh), interpolation=cv2.INTER_NEAREST)
-        for angle in (angle0 - 2, angle0 - 1, angle0, angle0 + 1, angle0 + 2):
-            templ, matrix = _rotate_template(scaled, angle)
-            templ_e, _ = _rotate_template(scaled_e, angle, nearest=True)
+        for angle in angle_span:
+            templ, matrix = _rotate_template(scaled, float(angle), border_value=fill)
+            templ_e, _ = _rotate_template(scaled_e, float(angle), nearest=True)
             if templ.shape[0] >= search.shape[0] or templ.shape[1] >= search.shape[1]:
                 continue
             score_g, px_g, py_g = _match_template_once(search, templ, opencl)
             score_e, px_e, py_e = _match_template_once(search_e, templ_e, opencl)
             score = max(0.0, float(score_g))
             if score_e >= 0.22 and abs(px_e - px_g) <= 4 and abs(py_e - py_g) <= 4:
-                score = float(0.60 * score_g + 0.40 * max(0.0, score_e))
-            if score <= float(best.get("confidence") or 0) + 1e-6:
+                blended = float(0.60 * score_g + 0.40 * max(0.0, score_e))
+                if blended > score:
+                    score = blended
+            # Prefer higher score; for equal scores keep the angle closer to the pyramid seed.
+            cur = float(best.get("confidence") or 0)
+            if score < cur - 1e-6:
                 continue
-            cand = _build_hit_from_match(scaled, matrix, px_g, py_g, angle, score, 1.0)
+            if abs(score - cur) <= 1e-6 and abs(float(angle) - angle0) >= abs(float(best.get("angle") or 0) - angle0):
+                continue
+            cand = _build_hit_from_match(scaled, matrix, px_g, py_g, float(angle), score, 1.0)
             cand["method"] = "template"
             best = cand
     return best
@@ -669,15 +709,29 @@ def _pick_best_match(
     if templ is None:
         return sift
     if _poses_agree(sift, templ, model_shape):
-        angle_delta = abs(float(sift.get("angle") or 0) - float(templ.get("angle") or 0))
-        # Divergent angles on the same part: keep SIFT pose (handles real rotation).
-        if angle_delta > 6.0 and float(sift["confidence"]) >= 0.35:
+        sift_ang = float(sift.get("angle") or 0)
+        templ_ang = float(templ.get("angle") or 0)
+        angle_delta = abs(sift_ang - templ_ang)
+        sift_conf = float(sift["confidence"])
+        templ_conf = float(templ["confidence"])
+        # SIFT found a clear rotation but template clung near 0° — keep SIFT pose.
+        if (
+            abs(sift_ang) >= 1.5
+            and abs(templ_ang) < 1.0
+            and sift_conf >= 0.32
+            and angle_delta >= 1.5
+        ):
             out = dict(sift)
             out["method"] = "sift"
             return out
-        if float(templ["confidence"]) >= float(sift["confidence"]):
+        # Divergent angles on the same part: keep SIFT pose (handles real rotation).
+        if angle_delta > 4.0 and sift_conf >= 0.32:
+            out = dict(sift)
+            out["method"] = "sift"
+            return out
+        if templ_conf >= sift_conf:
             out = dict(templ)
-            out["method"] = "sift+template" if float(sift["confidence"]) > 0.4 else "template"
+            out["method"] = "sift+template" if sift_conf > 0.4 else "template"
             return out
         return sift
     # Different places — take the stronger hit.
