@@ -154,6 +154,9 @@ select, input[type="text"] {
 .robot-ws-url { user-select: all; }
 body.mode-inspect .edit-only,
 body.mode-inspect .scene-edit { display: none; }
+/* Inspection: stage + results only. Flow list belongs in Edit layout. */
+body.mode-inspect #inspect.active { grid-template-columns: minmax(280px, 1fr) 300px; }
+body.mode-inspect #inspect.active > .flow { display: none; }
 body.mode-edit #inspect.active { grid-template-columns: 280px minmax(280px, 1fr) 300px; }
 .flow { overflow: auto; }
 .scene-edit { margin-top: 12px; }
@@ -644,7 +647,9 @@ article header label { flex-direction: row; align-items: center; color: var(--te
 
 /* Mid width: keep a usable preview; side panels shrink instead of crushing stage */
 @media (max-width: 1280px) {
-  #inspect.active,
+  body.mode-inspect #inspect.active {
+    grid-template-columns: minmax(260px, 1fr) 260px;
+  }
   body.mode-edit #inspect.active {
     grid-template-columns: 200px minmax(260px, 1fr) 260px;
   }
@@ -654,9 +659,15 @@ article header label { flex-direction: row; align-items: center; color: var(--te
   .topbar .label-short { display: inline; }
 }
 
-/* Tablet: preview on top, flow + judge below */
+/* Tablet: preview on top; inspect = judge only, edit = flow + judge */
 @media (max-width: 980px) {
-  #inspect.active,
+  body.mode-inspect #inspect.active {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(42vh, 1fr) minmax(240px, 48vh);
+    grid-template-areas:
+      "stage"
+      "judge";
+  }
   body.mode-edit #inspect.active {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     grid-template-rows: minmax(42vh, 1fr) minmax(240px, 48vh);
@@ -664,7 +675,8 @@ article header label { flex-direction: row; align-items: center; color: var(--te
       "stage stage"
       "flow judge";
   }
-  #inspect.active > .flow {
+  body.mode-edit #inspect.active > .flow {
+    display: block;
     grid-area: flow;
     border-right: none;
     border-top: 1px solid var(--line);
@@ -679,14 +691,13 @@ article header label { flex-direction: row; align-items: center; color: var(--te
     border-top: 1px solid var(--line);
   }
   /* Tool Connect/settings must stay clickable — judge was covering Test grab */
-  body.flow-open.tool-settings #inspect.active,
   body.mode-edit.flow-open.tool-settings #inspect.active {
     grid-template-rows: minmax(58vh, 1fr) minmax(160px, 34vh);
     grid-template-areas:
       "stage stage"
       "flow flow";
   }
-  body.flow-open.tool-settings #inspect.active > .judge {
+  body.mode-edit.flow-open.tool-settings #inspect.active > .judge {
     display: none;
   }
   .brand div { display: none; }
@@ -720,7 +731,16 @@ article header label { flex-direction: row; align-items: center; color: var(--te
     padding: 5px 8px;
     font-size: 13px;
   }
-  #inspect.active,
+  body.mode-inspect #inspect.active {
+    height: auto;
+    min-height: calc(100vh - 72px);
+    overflow: visible;
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(36vh, 50vh) auto;
+    grid-template-areas:
+      "stage"
+      "judge";
+  }
   body.mode-edit #inspect.active {
     height: auto;
     min-height: calc(100vh - 72px);
@@ -735,17 +755,17 @@ article header label { flex-direction: row; align-items: center; color: var(--te
   #inspect.active > .judge {
     border-left: none;
   }
-  #inspect.active > .flow {
+  body.mode-edit #inspect.active > .flow {
+    display: block;
     border-top: 1px solid var(--line);
   }
-  body.flow-open.tool-settings #inspect.active,
   body.mode-edit.flow-open.tool-settings #inspect.active {
     grid-template-rows: minmax(55vh, 1fr) auto;
     grid-template-areas:
       "stage"
       "flow";
   }
-  body.flow-open.tool-settings #inspect.active > .judge {
+  body.mode-edit.flow-open.tool-settings #inspect.active > .judge {
     display: none;
   }
   .brand small { display: none; }
