@@ -23,6 +23,19 @@ if errorlevel 1 (
   exit /b 1
 )
 
+set "APP_VERSION="
+if not exist ".version" (
+  echo .version was not found.
+  exit /b 1
+)
+for /f "usebackq delims=" %%V in (".version") do (
+  if not defined APP_VERSION set "APP_VERSION=%%V"
+)
+if not defined APP_VERSION (
+  echo .version is empty.
+  exit /b 1
+)
+
 if not exist ".venv\Scripts\python.exe" (
   python -m venv .venv
 )
@@ -42,10 +55,22 @@ if errorlevel 1 (
   exit /b 1
 )
 
+set "OUT_DIR=dist\SVision-%APP_VERSION%"
+if exist "%OUT_DIR%" rmdir /s /q "%OUT_DIR%"
+if errorlevel 1 (
+  echo Failed to replace %OUT_DIR%.
+  exit /b 1
+)
+move "dist\SVision" "%OUT_DIR%" >nul
+if errorlevel 1 (
+  echo Failed to save the build as %OUT_DIR%.
+  exit /b 1
+)
+
 echo.
 echo Self-contained app:
-echo   dist\SVision\SVision.exe
+echo   %OUT_DIR%\SVision.exe
 echo.
-echo Copy the whole dist\SVision folder to the IPC. No Python install is required there.
+echo Copy the whole %OUT_DIR% folder to the IPC. No Python install is required there.
 echo Close the console window to stop the server.
 endlocal
