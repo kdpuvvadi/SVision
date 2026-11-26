@@ -474,12 +474,14 @@ def _pick_best_match(
     if templ is None:
         return sift
     if _poses_agree(sift, templ, model_shape):
-        # Same hit: keep SIFT pose (handles rotation/scale), take the stronger score.
-        out = dict(sift)
-        out["confidence"] = max(float(sift["confidence"]), float(templ["confidence"]))
-        if float(templ["confidence"]) > float(sift["confidence"]):
-            out["method"] = "sift+template"
-        return out
+        # Same hit: take the stronger method's full pose (don't graft a high
+        # template score onto a drifted SIFT angle — that produced fake ±10°).
+        if float(templ["confidence"]) >= float(sift["confidence"]):
+            out = dict(templ)
+            out["confidence"] = float(templ["confidence"])
+            out["method"] = "sift+template" if float(sift["confidence"]) > 0.4 else "template"
+            return out
+        return sift
     # Different places — take the stronger hit.
     return sift if sift["confidence"] >= templ["confidence"] else templ
 
