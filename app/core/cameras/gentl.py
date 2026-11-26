@@ -90,6 +90,10 @@ _IFACE_TIMEOUT_MS = 800
 _DEVICE_TIMEOUT_MS = 1200
 _IFACE_TIMEOUT_KNOWN_MS = 250
 _DEVICE_TIMEOUT_KNOWN_MS = 400
+# Safe on standard MTU 1500 NICs. 4000+ needs jumbo frames or frames never arrive.
+_SAFE_PACKET_SIZE = 1500
+_MIN_GRAB_TIMEOUT_MS = 5000
+_MAX_GRAB_TIMEOUT_MS = 30000
 
 
 def _make_genapi_port(gentl_port):
@@ -337,6 +341,8 @@ class GenTLBackend(CameraBackend):
         self._label = ""
         self._last_open_ms = 0.0
         self._last_grab_ms = 0.0
+        self._exposure_ms = 0.0
+        self._frame_period_ms = 0.0
 
     def status(self) -> CameraStatus:
         with self._lock:
@@ -350,12 +356,32 @@ class GenTLBackend(CameraBackend):
             label = self._label or self.device_id or self.gige_ip or Path(self.cti_path).name
             return CameraStatus(self.source, True, f"GenTL camera {label} ready.")
 
+    def _grab_timeout_ms(self) -> int:
+        # Wait at least a few frame periods / exposures; long exposure otherwise looks like a hang.
+        needed = max(self._exposure_ms * 3.0, self._frame_period_ms * 3.0, float(_MIN_GRAB_TIMEOUT_MS))
+        return int(min(_MAX_GRAB_TIMEOUT_MS, max(_MIN_GRAB_TIMEOUT_MS, needed + 1500.0)))
+
     def grab(self) -> np.ndarray:
         """Return the newest live frame without waiting an extra exposure when possible."""
         with self._lock:
             started = time.perf_counter()
             self._ensure_open()
-            frame = self._grab_unlocked(ensure=False, prefer_latest=True)
+            try:
+                frame = self._grab_unlocked(ensure=False, prefer_latest=True)
+            except RuntimeError as exc:
+                if "timed out" not in str(exc).lower():
+                    raise
+                # Dead or stalled stream: reopen once, then fail with a clearer hint.
+                self._safe_close()
+                self._ensure_open()
+                try:
+                    frame = self._grab_unlocked(ensure=False, prefer_latest=False)
+                except RuntimeError as retry_exc:
+                    raise RuntimeError(
+                        f"{retry_exc} Check: camera power/link (prefer 1 Gbps), "
+                        f"no other app holding the device, exposure under "
+                        f"{self._grab_timeout_ms() / 1000:.0f}s, and NIC MTU if you raised packet size."
+                    ) from retry_exc
             self._last_grab_ms = (time.perf_counter() - started) * 1000.0
             return frame
 
@@ -388,7 +414,7 @@ class GenTLBackend(CameraBackend):
             seen += 1
         if newest is not None:
             return newest
-        return self._wait_buffer(5000)
+        return self._wait_buffer(self._grab_timeout_ms())
 
     def _buffer_looks_incomplete(self, buffer) -> bool:
         """True only when GenTL clearly reports a bad transfer."""
@@ -442,7 +468,8 @@ class GenTLBackend(CameraBackend):
         need = self._width * self._height
         last_thin = None
         for _ in range(6):
-            buffer = self._take_latest_buffer() if prefer_latest else self._wait_buffer(5000)
+            timeout_ms = self._grab_timeout_ms()
+            buffer = self._take_latest_buffer() if prefer_latest else self._wait_buffer(timeout_ms)
             raw = bytes(buffer.raw_buffer)
             if len(raw) < need:
                 try:
@@ -636,6 +663,11 @@ class GenTLBackend(CameraBackend):
         pixel = str(node_map.PixelFormat.value)
         payload = int(node_map.PayloadSize.value)
 
+        if hasattr(node_map, "AcquisitionMode"):
+            try:
+                node_map.AcquisitionMode.value = "Continuous"
+            except Exception:
+                pass
         if hasattr(node_map, "TriggerMode"):
             try:
                 node_map.TriggerMode.value = "Off"
@@ -649,14 +681,20 @@ class GenTLBackend(CameraBackend):
                     node_map.GevSCPD.value = int(getattr(node_map.GevSCPD, "min", 0) or 0)
             except Exception:
                 pass
-        # Prefer a mid-size packet: large enough for bandwidth, below jumbo risk on some NICs.
+        # Standard Ethernet MTU is 1500. Larger packets need jumbo frames or GenTL
+        # waits forever (Operation timed out / ID -1011) with no complete image.
         if hasattr(node_map, "GevSCPSPacketSize"):
             try:
                 maximum = int(node_map.GevSCPSPacketSize.max)
                 minimum = int(getattr(node_map.GevSCPSPacketSize, "min", 576) or 576)
-                target = min(4000, maximum)
+                target = min(_SAFE_PACKET_SIZE, maximum)
                 target = max(minimum, target)
                 node_map.GevSCPSPacketSize.value = target
+            except Exception:
+                pass
+        if hasattr(node_map, "AcquisitionFrameRateEnable"):
+            try:
+                node_map.AcquisitionFrameRateEnable.value = True
             except Exception:
                 pass
         if hasattr(node_map, "AcquisitionFrameRate"):
@@ -668,10 +706,12 @@ class GenTLBackend(CameraBackend):
             fps = float(getattr(node_map.AcquisitionFrameRate, "value", 0) or 0)
             fps_max = float(getattr(node_map.AcquisitionFrameRate, "max", 0) or 0)
             exp_us = float(getattr(node_map.ExposureTime, "value", 0) or 0)
+            self._exposure_ms = exp_us / 1000.0
+            self._frame_period_ms = (1000.0 / fps) if fps > 0.01 else max(self._exposure_ms, 0.0)
             from app.core.logutil import log
 
             log(
-                f"[GenTL] stream fps≈{fps:.2f} (max {fps_max:.2f}) exposure={exp_us/1000:.1f} ms "
+                f"[GenTL] stream fps≈{fps:.2f} (max {fps_max:.2f}) exposure={self._exposure_ms:.1f} ms "
                 f"pkt={int(getattr(node_map.GevSCPSPacketSize, 'value', 0) or 0)} "
                 f"scpd={int(getattr(node_map.GevSCPD, 'value', 0) or 0)}"
             )
@@ -682,14 +722,15 @@ class GenTLBackend(CameraBackend):
                     "(Windows → adapter → Speed & Duplex). GPU cannot speed up GigE transfer."
                 )
         except Exception:
-            pass
+            self._exposure_ms = 0.0
+            self._frame_period_ms = 0.0
 
         stream = DataStream(device)
         stream.open(list(device.data_stream_ids)[0])
         handles: list = []
         keep: list[bytes] = []
         # Few buffers: less free-run backlog (stale frames) while still covering GigE jitter.
-        for index in range(3):
+        for index in range(4):
             raw = bytes(payload)
             keep.append(raw)
             handle = stream.announce_buffer(BufferToken(raw, index))
@@ -717,6 +758,35 @@ class GenTLBackend(CameraBackend):
         self._pixel_format = pixel
         self._payload = payload
         self._label = display
+
+        # Prime: prove the stream delivers before we call the session ready.
+        # Otherwise Measure fails later with a bare GenTL -1011 timeout.
+        primed = False
+        prime_deadline = time.perf_counter() + max(2.0, self._grab_timeout_ms() / 1000.0)
+        last_prime_err: Exception | None = None
+        while time.perf_counter() < prime_deadline:
+            remaining = max(1, int((prime_deadline - time.perf_counter()) * 1000))
+            try:
+                event_manager.update_event_data(remaining)
+                buffer = event_manager.buffer
+                try:
+                    stream.queue_buffer(buffer)
+                except Exception:
+                    pass
+                primed = True
+                break
+            except Exception as exc:
+                last_prime_err = exc
+                continue
+        if not primed:
+            self._safe_close()
+            detail = f" ({last_prime_err})" if last_prime_err else ""
+            raise RuntimeError(
+                "GenTL opened the device but no frame arrived"
+                f"{detail}. Check 1 Gbps link, NIC MTU/jumbo, and that StViewer "
+                "or another app is not holding the camera."
+            )
+
         self._last_open_ms = (time.perf_counter() - open_started) * 1000.0
         if not self.device_id:
             self.device_id = str(getattr(target, "id_", "") or "")
